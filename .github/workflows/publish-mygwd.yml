@@ -63,7 +63,7 @@ jobs:
           bash -n client server resource/client/ui-script/ui-updateSave
           python3 -B -m unittest discover -s tests -p test_client_updates.py -k PanelUpdateTests -v
           python3 -B -m unittest discover -s tests -p test_regressions.py -k DistributionTests -v
-          git diff --cached --check
+          GIT_ALTERNATE_OBJECT_DIRECTORIES="$working/base/.git/objects" git diff --cached --check "$source_commit"
 
           git -c user.name=XDcooler -c user.email=33934716+XDcooler@users.noreply.github.com \
             -c commit.gpgsign=false commit -m 'Publish verified mygwd gateway with complete installation resources'
