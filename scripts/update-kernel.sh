@@ -47,8 +47,8 @@ if [[ $operation == --install ]]; then
     if systemd-detect-virt --container --quiet; then
         kernelError 'A container uses its host kernel; update the host instead.'; return 1
     fi
-    install -d -m0755 /run/lock || return 1
-    exec 9>/run/lock/mygwd-kernel-update.lock
+    install -d -m0700 /run/mygwd-kernel || return 1
+    exec 9>/run/mygwd-kernel/update.lock
     flock -n 9 || { kernelError 'Another kernel update is running.'; return 1; }
     apt-get -o DPkg::Lock::Timeout=120 -o APT::Update::Error-Mode=any update || return 1
 fi
@@ -61,10 +61,11 @@ if [[ $operation == --check ]]; then
     apt-get --simulate --no-remove --no-install-recommends install "$package"
     return $?
 fi
-install -d -m0755 /var/backups || return 1
+mkdir -p /var/backups || return 1
 backup=$(mktemp -d /var/backups/mygwd-kernel.XXXXXX) || return 1
 uname -r >"$backup/running-kernel.txt" || return 1
-dpkg-query -W -f='${binary:Package}\t${Version}\t${Status}\n' 'linux-image-*' >"$backup/packages-before.txt" || return 1
+dpkg-query -W -f='${binary:Package}\t${Version}\t${Status}\n' |
+    awk -F '\t' '$1 ~ /^linux-image-/' >"$backup/packages-before.txt" || return 1
 chmod 0600 "$backup/"*.txt || return 1
 apt-get -o DPkg::Lock::Timeout=120 --yes --no-remove --no-install-recommends install "$package" || return 1
 [[ $(dpkg-query -W -f='${Status}' "$package") == 'install ok installed' ]] || return 1

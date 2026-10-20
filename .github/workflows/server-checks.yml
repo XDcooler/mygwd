@@ -45,6 +45,7 @@ jobs:
           runuser -u nobody -- python3 -B tests/test_kernel_update.py
           python3 -B tests/test_rule_updates.py
           python3 -B tests/test_pihole_install.py
+          runuser -u nobody -- python3 -B tests/test_pihole_install.py
       - name: Install real Debian kernel packages in the disposable filesystem
         shell: bash
         run: |

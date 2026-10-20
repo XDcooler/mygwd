@@ -30,7 +30,7 @@ class ServerInstallerTests(unittest.TestCase):
         source = (REPO/'server').read_text().rsplit('\ncase "${1:-}" in\n', 1)[0]
         mappings = {'/opt/de_GWD': str(self.root/'gateway'), '/etc/': str(self.root/'etc')+'/',
                     '/var/www/': str(self.root/'www')+'/', '/tmp/': str(self.root/'tmp')+'/',
-                    '/run/lock': str(self.root/'locks'), '/lib/systemd/': str(self.root/'lib/systemd')+'/'}
+                    '/run/mygwd-server': str(self.root/'locks'), '/lib/systemd/': str(self.root/'lib/systemd')+'/'}
         for index, old in enumerate(mappings):
             source = source.replace(old, '__FIXTURE_'+str(index)+'__')
         for index, new in enumerate(mappings.values()):

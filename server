@@ -44,8 +44,8 @@ runServerOperation(){
 (
 requireRoot || exit 1
 requireDebian13 || exit 1
-install -d -m0755 /run/lock || exit 1
-exec 9>/run/lock/mygwd-server.lock
+install -d -m0700 /run/mygwd-server || exit 1
+exec 9>/run/mygwd-server/operation.lock
 flock -n 9 || { red "Another server operation is running."; exit 1; }
 serverPhase=preflight
 serverCronStopped=0

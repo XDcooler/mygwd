@@ -19,7 +19,7 @@ class KernelUpdateTests(unittest.TestCase):
         self.os_release.write_text('ID=debian\nVERSION_ID=13\n')
         source = (REPO/'scripts/update-kernel.sh').read_text()
         for original, destination in [('/etc/os-release', str(self.os_release)),
-                ('/run/lock', str(self.root/'locks')), ('/var/backups', str(self.root/'backups')),
+                ('/run/mygwd-kernel', str(self.root/'locks')), ('/var/backups', str(self.root/'backups')),
                 ('/boot/', str(self.root/'boot')+'/'), ('/lib/modules/', str(self.root/'modules')+'/')]:
             source = source.replace(original, destination)
         self.source = self.root/'kernel.sh'
@@ -44,6 +44,7 @@ apt-cache() { printf '  Candidate: %s\\n' "$CANDIDATE"; }
 apt-get() { echo "apt-get $*" >>"$EVENTS"; [[ -z $APT_FAIL || " $* " != *" $APT_FAIL "* ]]; }
 dpkg-query() {
     case "$*" in
+        *binary:Package*) printf 'linux-image-previous\\t1\\tinstall ok installed\\n';;
         *Depends*) echo "$IMAGE (= 6.12.999-1)";;
         *) echo 'install ok installed';;
     esac
@@ -130,6 +131,7 @@ reboot() { echo reboot >>"$EVENTS"; return 99; }
         backup = next((self.root/'backups').iterdir())
         self.assertEqual(backup.stat().st_mode & 0o777, 0o700)
         self.assertEqual((backup/'packages-before.txt').stat().st_mode & 0o777, 0o600)
+        self.assertIn('linux-image-previous', (backup/'packages-before.txt').read_text())
         self.assertNotIn('purge', self.events.read_text())
         self.assertNotIn('reboot', self.events.read_text())
 
