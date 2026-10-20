@@ -368,7 +368,7 @@ result=$?
         # Reaching profile means dependency failure was ignored. Exit before
         # any later installer operations could escape the fixture.
         (self.fixture/'etc/profile').write_text('exit 97\n')
-        for installer, failures in [('server', ['update', 'upgrade', 'install']),
+        for installer, failures in [('server', ['update', 'install']),
                                     ('client', ['update', 'install'])]:
             body = (REPO/installer).read_text().split('preInstall(){\n', 1)[1].split('\n}\n', 1)[0]
             functions = self.fixture/'dependency-functions.sh'

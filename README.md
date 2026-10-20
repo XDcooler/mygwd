@@ -20,6 +20,11 @@ apt install -y curl
 bash <(curl -fsSL https://raw.githubusercontent.com/XDcooler/mygwd/main/server)
 ```
 
+服务端也支持明确的 Bash 命令：`bash server --install example.com`、`bash server --update`、
+`bash server --kernel-check`、`bash server --update-kernel`、`bash server --enable-bbr`。
+内核更新安装匹配的 Debian 内核元包，保留旧内核并提示手动重启；开启 BBR 是独立操作。
+下载方式、域名证书要求和验证范围见 [服务端 Bash 安装与内核更新](docs/server-install-kernel.md)。
+
 
 
 ## Debian 13 客户端（amd64 / arm64）

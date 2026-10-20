@@ -1,0 +1,63 @@
+name: Server Bash and Debian kernel checks
+
+on:
+  push:
+    branches: [main, server-install-kernel]
+    paths:
+      - server
+      - scripts/update-kernel.sh
+      - tests/test_server_installer.py
+      - tests/test_kernel_update.py
+      - .github/workflows/server-checks.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  debian13:
+    runs-on: ubuntu-latest
+    container: debian:13
+    timeout-minutes: 20
+    steps:
+      - name: Prepare the disposable Debian 13 environment
+        run: |
+          apt-get -o APT::Update::Error-Mode=any update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bash ca-certificates git python3 jq moreutils unzip util-linux shellcheck \
+            nginx-full openssl
+      - name: Fetch the exact tested commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git init -q
+          git fetch --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout -q --detach FETCH_HEAD
+      - name: Check syntax and isolated failure handling
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n server scripts/update-kernel.sh
+          shellcheck --severity=error server scripts/update-kernel.sh
+          python3 -B tests/test_server_installer.py
+          python3 -B tests/test_kernel_update.py
+          runuser -u nobody -- python3 -B tests/test_kernel_update.py
+          python3 -B tests/test_rule_updates.py
+          python3 -B tests/test_pihole_install.py
+      - name: Install real Debian kernel packages in the disposable filesystem
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The production command rejects containers. This test driver models
+          # the VM platform only; APT, package hooks and artifact checks are real.
+          # Docker's /boot and /lib/modules are disposable container filesystems.
+          source scripts/update-kernel.sh
+          uname() {
+            if [[ ${1:-} == -r ]]; then printf '%s\n' '6.12.0+deb13-cloud-amd64'
+            else command uname "$@"; fi
+          }
+          systemd-detect-virt() { return 1; }
+          kernelMain --check
+          kernelMain --install
+          dpkg-query -W linux-image-cloud-amd64

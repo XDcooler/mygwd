@@ -7,7 +7,13 @@ python3 scripts/build-client-archive.py
 python3 tests/test_regressions.py
 python3 tests/test_rule_updates.py
 python3 tests/test_client_updates.py
+python3 tests/test_server_installer.py
+python3 tests/test_kernel_update.py
 ```
+
+服务端检查及 Debian 13 内核包安装验证见 [服务端 Bash 安装与内核更新](../docs/server-install-kernel.md)。
+服务端 fixture 将所有写入放在临时目录；包管理、服务命令做适配，原生 Linux 测试使用随包 Xray 和本地 Nginx。
+内核用例需分别以 root 与普通用户运行，分别覆盖安装分支和非 root 拒绝；没有在运行测试的宿主机更新内核。
 
 `test_client_updates.py` 在临时目录运行实际更新入口和面板 broker，使用服务命令适配器，
 覆盖逐阶段失败、信号中断、cron 恢复、Xray 就绪和规则启动重试、空参数兼容、配置权限、

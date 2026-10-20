@@ -1,5 +1,7 @@
 #!/bin/bash
-clear
+serverSourcePath=${BASH_SOURCE[0]}
+set -o pipefail
+[[ ! -t 1 ]] || clear
 red()    { echo -e "\033[31m\033[01m $1 \033[0m"; }
 green()  { echo -e "\033[32m\033[01m $1 \033[0m"; }
 yellow() { echo -e "\033[33m\033[01m $1 \033[0m"; }
@@ -23,12 +25,50 @@ architecture=$(dpkg --print-architecture)
 virt=$(systemd-detect-virt)
 [[ -z $(echo "openvz lxc lxc-libvirt systemd-nspawn docker podman rkt wsl proot pouch" | grep $virt) ]] && virtVC="vm"
 [[ -n $(echo "openvz lxc lxc-libvirt systemd-nspawn docker podman rkt wsl proot pouch" | grep $virt) ]] && virtVC="container"
-BBRPLUS_Ver="5.10.52"
 NGINX_Ver="1.21.1"
 
 rulesRepository="${DE_GWD_RULES_REPOSITORY:-XDcooler/mygwd}"
 rulesBranch="${DE_GWD_RULES_BRANCH:-main}"
-sourceDirectory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+sourceDirectory=$(cd -- "$(dirname -- "$serverSourcePath")" && pwd)
+
+requireRoot(){
+[[ $EUID == 0 ]] || { red "Run this command as root (sudo bash server ...)."; return 1; }
+}
+
+runServerStage(){
+serverPhase=$1
+"$@"
+}
+
+runServerOperation(){
+(
+requireRoot || exit 1
+requireDebian13 || exit 1
+install -d -m0755 /run/lock || exit 1
+exec 9>/run/lock/mygwd-server.lock
+flock -n 9 || { red "Another server operation is running."; exit 1; }
+serverPhase=preflight
+serverCronStopped=0
+trap 'result=$?; trap - EXIT; if [[ $serverCronStopped == 1 ]]; then service cron restart || result=1; fi; if [[ $result != 0 ]]; then red "Server operation failed at $serverPhase (exit $result)."; fi; exit "$result"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+"$@"
+)
+}
+
+runKernelUpdate(){
+local helper
+requireRoot || return 1
+requireDebian13 || return 1
+helper=$(mktemp /tmp/mygwd-kernel.XXXXXX) || return 1
+copyOrDownloadAsset scripts/update-kernel.sh "$helper" || { rm -f "$helper"; return 1; }
+bash -n "$helper" || { rm -f "$helper"; return 1; }
+bash "$helper" "$@"
+local result=$?
+rm -f "$helper"
+return "$result"
+}
 
 installRulesUpdater(){
 mkdir -p /opt/de_GWD
@@ -92,6 +132,8 @@ requireDebian13(){
 
 
 preUpdate(){
+jq -e '.inbounds[0].streamSettings.wsSettings.path | type == "string" and startswith("/")' /opt/de_GWD/vtrui/config.json >/dev/null || return 1
+jq -e '.inbounds[0].settings.clients | length > 0' /opt/de_GWD/vtrui/config.json >/dev/null || return 1
 if [[ -f "/etc/nginx/conf.d/supp_head" ]] && [[ -f "/etc/nginx/conf.d/supp_body" ]]; then
 mv -f /etc/nginx/conf.d/supp_head /etc/nginx/conf.d/0_top
 mv -f /etc/nginx/conf.d/supp_body /etc/nginx/conf.d/3_reverseProxy
@@ -148,7 +190,8 @@ rm -rf /tmp/now.cron
 
 
 
-service cron stop
+service cron stop || return 1
+serverCronStopped=1
 
 ethernetnum=$(ip --oneline link show up | grep -v "lo" | awk '{print$2;exit}' | cut -d':' -f1 | cut -d'@' -f1)
 ethernetnums=$(ip --oneline link show up | grep -v "lo" | awk '{print $2}' | cut -d':' -f1 | cut -d'@' -f1 | xargs | sed 's/ /,/g')
@@ -166,6 +209,7 @@ upDomain=$(jq -r '.outbounds[0].settings.vnext[0].address' /opt/de_GWD/vtrui/con
 upPort=$(jq -r '.outbounds[0].settings.vnext[0].port' /opt/de_GWD/vtrui/config.json 2>/dev/null | grep -v '^null$')
 upUUID=$(jq -r '.outbounds[0].settings.vnext[0].users[0].id' /opt/de_GWD/vtrui/config.json 2>/dev/null | grep -v '^null$')
 xtlsPort=$(jq -r '.inbounds[] | select(.tag == "forward") | .port' /opt/de_GWD/vtrui/config.json 2>/dev/null | grep -v '^null$')
+return 0
 }
 
 
@@ -197,9 +241,11 @@ EOF
 
 mkdir -p /opt/de_GWD
 cat << "EOF" >/opt/de_GWD/tcpTime
-date -s "$(wget -qSO- --max-redirect=0 whatismyip.akamai.com 2>&1 | grep Date: | cut -d' ' -f5-8)Z" | grep -v ' 08:00:00 '
-[[ $? -ne "0" ]]&& date -s "$(wget -qSO- --max-redirect=0 ifconfig.me 2>&1 | grep Date: | cut -d' ' -f5-8)Z"
-hwclock -w
+#!/bin/bash
+if ! timeout 5 timedatectl show --property=NTPSynchronized --value 2>/dev/null | grep -qx yes; then
+    echo 'System NTP is not synchronized; check the configured time service.' >&2
+fi
+exit 0
 EOF
 chmod +x /opt/de_GWD/tcpTime
 
@@ -221,7 +267,8 @@ EOF
 printf '%s\n' "$DEBIAN_SOURCES_origin" >/etc/apt/sources.list
 
 dpkg --configure -a || return 1
-apt update --fix-missing && apt upgrade --allow-downgrades && apt autoremove && apt autoclean || return 1
+# Application installation only prepares dependencies; OS/kernel upgrades are separate.
+apt update --fix-missing || return 1
 
 unset aptPKG
 [[ -z $(dpkg -l | grep ' sudo ') ]] && aptPKG+=(sudo)
@@ -281,7 +328,6 @@ EOF
 if [[ $virtVC == "vm" ]]; then
 modprobe nf_conntrack
 modprobe xt_conntrack
-modprobe ip_conntrack
 modprobe nf_nat
 modprobe xt_nat
 modprobe iptable_nat
@@ -297,7 +343,6 @@ sed -i '/ip_tables/d' /etc/modules-load.d/modules.conf
 cat << EOF >>/etc/modules-load.d/modules.conf
 nf_conntrack
 xt_conntrack
-ip_conntrack
 nf_nat
 xt_nat
 iptable_nat
@@ -660,15 +705,23 @@ install -d -m 0755 /opt/de_GWD /opt/de_GWD/vtrui
 
 copyOrDownloadAsset "resource/vtrui_$architecture.zip" /tmp/vtrui.zip || return 1
 
-if [[ $(unzip -tq /tmp/vtrui.zip 2>/dev/null) =~ "No errors" ]]; then
+python3 - /tmp/vtrui.zip <<'PY_SERVER_CORE' || return 1
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    if archive.testzip() is not None:
+        raise ValueError('Corrupt proxy core archive')
+    for name in ('xray', 'geoip.dat', 'geosite.dat'):
+        entry = archive.getinfo(name)
+        if entry.is_dir() or entry.file_size == 0:
+            raise ValueError('Incomplete proxy core archive')
+PY_SERVER_CORE
 rm -rf /tmp/vtrui
-unzip /tmp/vtrui.zip -d /tmp/vtrui >/dev/null 2>&1
-mv -f /tmp/vtrui/xray /opt/de_GWD/vtrui/vtrui
-cp -f /tmp/vtrui/geoip.dat /opt/de_GWD/vtrui/geoip.dat
-cp -f /tmp/vtrui/geosite.dat /opt/de_GWD/vtrui/geosite.dat
-chmod +x /opt/de_GWD/vtrui/vtrui
+unzip /tmp/vtrui.zip -d /tmp/vtrui >/dev/null 2>&1 || return 1
+mv -f /tmp/vtrui/xray /opt/de_GWD/vtrui/vtrui || return 1
+cp -f /tmp/vtrui/geoip.dat /opt/de_GWD/vtrui/geoip.dat || return 1
+cp -f /tmp/vtrui/geosite.dat /opt/de_GWD/vtrui/geosite.dat || return 1
+chmod +x /opt/de_GWD/vtrui/vtrui || return 1
 rm -rf /tmp/vtrui*
-fi
 
 rm -rf /lib/systemd/system/vtrui.service
 cat << EOF >/etc/systemd/system/vtrui.service
@@ -1139,6 +1192,7 @@ jq --argjson OBdir "$OBdir" '.outbounds+=[$OBdir]' |\
 jq --argjson OBblo "$OBblo" '.outbounds+=[$OBblo]' | sponge /opt/de_GWD/vtrui/config.json
 
 [[ $virtVC == "container" ]] && jq --arg flow "xtls-rprx-direct" '.outbounds[0].settings.vnext[0].users[0].flow=$flow' /opt/de_GWD/vtrui/config.json | sponge /opt/de_GWD/vtrui/config.json
+return 0
 }
 
 xrayOutboundDirect(){
@@ -1167,6 +1221,10 @@ jq --argjson OBblo "$OBblo" '.outbounds+=[$OBblo]' | sponge /opt/de_GWD/vtrui/co
 
 
 postInstall(){
+chown root:www-data /opt/de_GWD/vtrui/config.json || return 1
+chmod 0640 /opt/de_GWD/vtrui/config.json || return 1
+nginx -t || return 1
+/opt/de_GWD/vtrui/vtrui -test -config /opt/de_GWD/vtrui/config.json >/dev/null || return 1
 /opt/de_GWD/ui-updateRules || return 1
 if [[ ! -f /var/www/html/index.html && ! -f /var/www/html/index.htm && ! -f /var/www/html/index.php ]]; then
 
@@ -1237,7 +1295,8 @@ cat << EOF >>/tmp/now.cron
 EOF
 crontab /tmp/now.cron
 rm -rf /tmp/now.cron
-service cron restart
+service cron restart || return 1
+serverCronStopped=0
 
 cat << "EOF" >/tmp/comRestart
 #!/bin/bash
@@ -1261,41 +1320,6 @@ chmod +x /tmp/comRestart
 
 /bin/bash /tmp/comRestart || return 1
 
-if [[ $(dpkg --list | grep linux-image | wc -l) != "1" ]] && [[ -n $(dpkg --list | grep linux-image | grep xanmod) ]]; then
-red "Xanmod kernel updated & reboot"
-
-cat << "EOF" >~/clearKernel
-#!/bin/bash
-PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-
-dpkg --list | grep linux-image | awk '{print $2}' | grep -Fv $(uname -r) | while read line
-do
-apt purge -y $line
-done
-
-dpkg --list | grep linux-headers | awk '{print $2}' | grep -Fv $(uname -r) | while read line
-do
-apt purge -y $line
-done
-
-crontab -l 2>/dev/null > ~/now.cron
-sed -i '/clearKernel/d' ~/now.cron
-crontab ~/now.cron
-rm -rf ~/now.cron
-rm -rf ~/clearKernel
-systemctl restart sshd >/dev/null
-EOF
-chmod +x ~/clearKernel
-
-crontab -l 2>/dev/null > ~/now.cron
-echo '@reboot ~/clearKernel' >> ~/now.cron
-crontab ~/now.cron
-rm -rf ~/now.cron
-
-sleep 2
-sudo reboot
-exit
-fi
 }
 
 
@@ -1303,20 +1327,19 @@ fi
 
 
 installBBRplus(){
-modprobe tcp_bbr || return 1
-install -d /etc/sysctl.d
-printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' >/etc/sysctl.d/90-de-gwd-bbr.conf
-sysctl --system >/dev/null || return 1
-blue "Debian 13 kernel BBR enabled"
+installBBR
 }
 
 
 
 installBBR(){
+requireRoot || return 1
+requireDebian13 || return 1
+[[ $virtVC != container ]] || { red "Container kernels are managed by the host."; return 1; }
 modprobe tcp_bbr || return 1
 install -d /etc/sysctl.d
 printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' >/etc/sysctl.d/90-de-gwd-bbr.conf
-sysctl --system >/dev/null || return 1
+sysctl -p /etc/sysctl.d/90-de-gwd-bbr.conf >/dev/null || return 1
 blue "Debian 13 kernel BBR enabled"
 }
 
@@ -1802,26 +1825,37 @@ blue "Project version checks and automatic code updates have been removed. Rule 
 
 installGWD(){
 requireDebian13 || return 1
+if [[ -n ${1:-} ]]; then
+    vpsdomainP=$1
+else
     green "=================="
     green " Input VPS domain"
     green "=================="
-    read vpsdomainP
+    IFS= read -r vpsdomainP || return 1
+fi
 
-domain=$(echo $vpsdomainP | cut -d: -f1)
+domain=${vpsdomainP%%:*}
+local domainPattern='^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$'
+[[ ${#domain} -le 253 && $domain =~ $domainPattern ]] || { red "Supply a valid DNS domain, optionally followed by :PORT."; return 1; }
 topDomain=$(echo $domain | rev | awk -F. '{print $1"."$2}' | rev)
-port=$(echo $vpsdomainP | cut -d: -f2 | grep '^[[:digit:]]*$')
-[[ -z $port ]] && port="443"
+port=443
+if [[ $vpsdomainP == *:* ]]; then
+    port=${vpsdomainP#*:}
+    [[ $port =~ ^[0-9]{1,5}$ ]] && ((10#$port >= 1 && 10#$port <= 65535)) || { red "Invalid HTTPS port."; return 1; }
+    port=$((10#$port))
+fi
 
 if [[ $port != "443" ]]; then
     green "==============================="
     green " Cloudflare API KEY"
     green "==============================="
-    read CFapikey
+    IFS= read -r -s CFapikey || return 1
+    echo
 
     green "==============================="
     green " Cloudflare Email"
     green "==============================="
-    read CFemail
+    IFS= read -r CFemail || return 1
 fi
 
 uuids=$(cat /proc/sys/kernel/random/uuid)
@@ -1831,37 +1865,37 @@ ethernetnum=$(ip --oneline link show up | grep -v "lo" | awk '{print $2}' | cut 
 ethernetnums=$(ip --oneline link show up | grep -v "lo" | awk '{print $2}' | cut -d':' -f1 | cut -d'@' -f1 | xargs | sed 's/ /,/g')
 localaddr=$(ip -4 a | grep inet | grep -v 127.0.0 | awk '{print $2}' | cut -d'/' -f1 | head -n 1)
 
-preInstall || return 1
+runServerStage preInstall || return 1
 
-installPihole || return 1
+runServerStage installPihole || return 1
 
-piholeSet || return 1
+runServerStage piholeSet || return 1
 
-installIptablesRules || return 1
+runServerStage installIptablesRules || return 1
 
-installDOH || return 1
+runServerStage installDOH || return 1
 
-installNginx || return 1
+runServerStage installNginx || return 1
 
-installXray
+runServerStage installXray || return 1
 
 if [[ $port == "443" ]]; then
-makeSSL_W
+runServerStage makeSSL_W || return 1
 else
-makeSSL_D
+runServerStage makeSSL_D || return 1
 fi
 
-ocspStapling
+runServerStage ocspStapling || return 1
 
-nginxWebConf
+runServerStage nginxWebConf || return 1
 
-xrayInbound
+runServerStage xrayInbound || return 1
 
-xrayOutboundDirect
+runServerStage xrayOutboundDirect || return 1
 
-postInstall || return 1
+runServerStage postInstall || return 1
 
-printNode
+printNode || return 1
 
 blue "----------------------"
 blue  "Install de_GWD [done]"
@@ -1874,37 +1908,37 @@ updateGWD(){
 requireDebian13 || return 1
 [[ $(cat /opt/de_GWD/role 2>/dev/null) == server || -f /opt/de_GWD/version.php ]] || { red "this is not server"; return 1; }
 
-preUpdate
+runServerStage preUpdate || return 1
 
-preInstall || return 1
+runServerStage preInstall || return 1
 
-installPihole || return 1
+runServerStage installPihole || return 1
 
-piholeSet || return 1
+runServerStage piholeSet || return 1
 
-installIptablesRules || return 1
+runServerStage installIptablesRules || return 1
 
-installDOH || return 1
+runServerStage installDOH || return 1
 
-installNginx || return 1
+runServerStage installNginx || return 1
 
-installXray
+runServerStage installXray || return 1
 
-nginxWebConf
+runServerStage nginxWebConf || return 1
 
-xrayInbound
+runServerStage xrayInbound || return 1
 
 if [[ -n $xtlsPort ]]; then
-  xrayInboundForward
+  runServerStage xrayInboundForward || return 1
 fi
 
 if [[ -n $upDomain ]]; then
-  xrayOutboundForward
+  runServerStage xrayOutboundForward || return 1
 else
-  xrayOutboundDirect
+  runServerStage xrayOutboundDirect || return 1
 fi
 
-postInstall || return 1
+runServerStage postInstall || return 1
 
 blue "---------------------"
 blue  "Update de_GWD [done]"
@@ -1969,7 +2003,7 @@ blue  $virt
     green "=================================================="
     echo
     green  "1. Install de_GWD"
-    green  "2. Install bbrplus"
+    yellow "Kernel and BBR are managed by the container host"
     red    "4. Change domain and generate new certificate"
     red    "5. Change Xray path & UUID"
     yellow "0. Update de_GWD"
@@ -1978,14 +2012,14 @@ blue  $virt
     cyan   "55.Set TCP Port Forward "
     red    "CTRL+C EXIT"
     echo
-    read -p "Select:" num
+    read -r -p "Select:" num || return 0
     case "$num" in
     1)
-    installGWD
+    runServerOperation installGWD
     start_menu
     ;;
     2)
-    installBBRplus
+    red "Container kernels and BBR must be configured on the host."
     start_menu
     ;;
     4)
@@ -1997,7 +2031,7 @@ blue  $virt
     start_menu
     ;;
     0)
-    updateGWD
+    runServerOperation updateGWD
     start_menu
     ;;
     00)
@@ -2046,7 +2080,7 @@ blue  $virt
     green "=================================================="
     echo
     green  "1. Install de_GWD"
-    green  "2. Enable Debian kernel BBR"
+    green  "2. Update Debian kernel (keep old kernels; reboot manually)"
     green  "3. Enable Debian kernel BBR"
     red    "4. Change domain and generate new certificate"
     red    "5. Change Xray path & UUID"
@@ -2057,14 +2091,14 @@ blue  $virt
     cyan   "55.Set TCP Port Forward "
     red    "CTRL+C EXIT"
     echo
-    read -p "Select:" num
+    read -r -p "Select:" num || return 0
     case "$num" in
     1)
-    installGWD
+    runServerOperation installGWD
     start_menu
     ;;
     2)
-    installBBRplus
+    runKernelUpdate --install
     start_menu
     ;;
     3)
@@ -2080,7 +2114,7 @@ blue  $virt
     start_menu
     ;;
     0)
-    updateGWD
+    runServerOperation updateGWD
     start_menu
     ;;
     00)
@@ -2113,4 +2147,30 @@ blue  $virt
 fi
 }
 
-start_menu
+serverUsage(){
+cat <<'USAGE'
+mygwd server (Debian 13 amd64/arm64)
+Usage: sudo bash server [OPTION]
+  --install [DOMAIN[:PORT]]  Install; port 443 uses ACME HTTP validation.
+  --update                  Update the installed server application.
+  --kernel-check            Show the kernel APT plan without installing.
+  --update-kernel           Install the matching Debian kernel metapackage.
+  --enable-bbr              Enable BBR in the running kernel.
+  --help                    Show this help.
+Without an option, open the interactive menu. Kernel installation keeps old
+kernels and requires a later manual reboot; BBR alone does not update kernels.
+USAGE
+}
+
+case "${1:-}" in
+    --help|-h) serverUsage;;
+    --install)
+        [[ $# -le 2 ]] || { serverUsage >&2; exit 2; }
+        runServerOperation installGWD "${2:-}";;
+    --update) [[ $# == 1 ]] || exit 2; runServerOperation updateGWD;;
+    --kernel-check) [[ $# == 1 ]] || exit 2; runKernelUpdate --check;;
+    --update-kernel) [[ $# == 1 ]] || exit 2; runKernelUpdate --install;;
+    --enable-bbr) [[ $# == 1 ]] || exit 2; installBBR;;
+    '') requireRoot && requireDebian13 && start_menu;;
+    *) serverUsage >&2; exit 2;;
+esac
