@@ -30,7 +30,8 @@ class ServerInstallerTests(unittest.TestCase):
         source = (REPO/'server').read_text().rsplit('\ncase "${1:-}" in\n', 1)[0]
         mappings = {'/opt/de_GWD': str(self.root/'gateway'), '/etc/': str(self.root/'etc')+'/',
                     '/var/www/': str(self.root/'www')+'/', '/tmp/': str(self.root/'tmp')+'/',
-                    '/run/mygwd-server': str(self.root/'locks'), '/lib/systemd/': str(self.root/'lib/systemd')+'/'}
+                    '/run/mygwd-server': str(self.root/'locks'), '/lib/systemd/': str(self.root/'lib/systemd')+'/',
+                    '/root/': str(self.root/'root')+'/'}
         for index, old in enumerate(mappings):
             source = source.replace(old, '__FIXTURE_'+str(index)+'__')
         for index, new in enumerate(mappings.values()):
@@ -132,6 +133,40 @@ preInstall
                 self.assertNotIn('profile', self.events.read_text())
                 self.assertNotIn('upgrade', self.events.read_text())
                 self.assertNotIn('autoremove', self.events.read_text())
+
+    def certificate_request(self, fail='0'):
+        ssl_directory = self.root/'www/ssl'
+        ssl_directory.mkdir(parents=True)
+        (ssl_directory/'dhparam.pem').touch()
+        acme = self.root/'acme-mock'
+        acme.write_text('''#!/bin/bash
+echo "acme $*" >>"$EVENTS"
+if [[ $1 == --issue && $FAIL_CERT == 1 ]]; then exit 1; fi
+if [[ $1 == --installcert ]]; then touch "$CERT_DIRECTORY/de_GWD.key" "$CERT_DIRECTORY/de_GWD.cer"; fi
+''')
+        return self.shell('''
+curl() { return 0; }
+sh() { mkdir -p "$ACME_HOME"; cp "$ACME_MOCK" "$ACME_HOME/acme.sh"; chmod +x "$ACME_HOME/acme.sh"; }
+crontab() { return 0; }
+chown() { return 0; }
+domain=edge.example.co.uk; topDomain=co.uk
+CFapikey=fixture; CFemail=fixture@example.test
+makeSSL_D
+''', ACME_MOCK=str(acme), ACME_HOME=str(self.root/'root/.acme.sh'),
+            CERT_DIRECTORY=str(ssl_directory), FAIL_CERT=fail)
+
+    def test_dns_certificate_uses_the_full_hostname_for_multilevel_suffixes(self):
+        result = self.certificate_request()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = self.events.read_text()
+        self.assertIn('--issue --dns dns_cf -d edge.example.co.uk -d *.edge.example.co.uk', events)
+        self.assertIn('--installcert -d edge.example.co.uk --ecc', events)
+        self.assertNotIn('-d co.uk', events)
+
+    def test_failed_dns_certificate_request_does_not_install_a_certificate(self):
+        result = self.certificate_request('1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('--installcert', self.events.read_text())
 
     def core_install(self, archive):
         core = self.root/'gateway/vtrui/vtrui'

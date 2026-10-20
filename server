@@ -190,8 +190,8 @@ rm -rf /tmp/now.cron
 
 
 
-service cron stop || return 1
 serverCronStopped=1
+service cron stop || return 1
 
 ethernetnum=$(ip --oneline link show up | grep -v "lo" | awk '{print$2;exit}' | cut -d':' -f1 | cut -d'@' -f1)
 ethernetnums=$(ip --oneline link show up | grep -v "lo" | awk '{print $2}' | cut -d':' -f1 | cut -d'@' -f1 | xargs | sed 's/ /,/g')
@@ -866,8 +866,8 @@ sh /tmp/de-gwd-acme-install.sh --install-online --home /root/.acme.sh || return 
 rm -f /tmp/de-gwd-acme-install.sh
 "/root/.acme.sh"/acme.sh --upgrade  --auto-upgrade
 "/root/.acme.sh"/acme.sh --set-default-ca --server letsencrypt --home /root/.acme.sh || return 1
-"/root/.acme.sh"/acme.sh --issue --dns dns_cf -d "$topDomain" -d "*.$topDomain" -k ec-256 --home /root/.acme.sh || return 1
-"/root/.acme.sh"/acme.sh --installcert -d $topDomain --ecc \
+"/root/.acme.sh"/acme.sh --issue --dns dns_cf -d "$domain" -d "*.$domain" -k ec-256 --home /root/.acme.sh || return 1
+"/root/.acme.sh"/acme.sh --installcert -d "$domain" --ecc \
                --key-file       /var/www/ssl/de_GWD.key  \
                --fullchain-file /var/www/ssl/de_GWD.cer \
                --reloadcmd     "systemctl force-reload nginx" --home /root/.acme.sh || return 1
