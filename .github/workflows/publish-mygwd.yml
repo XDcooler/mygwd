@@ -1,0 +1,71 @@
+name: Publish complete mygwd source
+
+on:
+  push:
+    branches: [bootstrap-mygwd]
+    paths: [.github/workflows/publish-mygwd.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bootstrap-mygwd-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'XDcooler/mygwd' && github.ref == 'refs/heads/bootstrap-mygwd'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Assemble, verify and publish the complete fixed project
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          readonly source_commit=667a39b3cdd069e4fad23e596540544875d8184d
+          readonly expected_tree=0d3865b8cb085708c88b58b5347039309f41ee8b
+          readonly expected_main=d0e9d65bf071e485c880ef4a8ca3967f0578d455
+          working=$(mktemp -d "$RUNNER_TEMP/mygwd-publish.XXXXXX")
+          authorization="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          destination="https://github.com/$GITHUB_REPOSITORY.git"
+          mkdir -p "$working/overrides"
+
+          git init -q "$working/prepared"
+          git -C "$working/prepared" -c http.extraHeader="$authorization" fetch --depth=1 "$destination" "$GITHUB_SHA"
+          test "$(git -C "$working/prepared" rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git -C "$working/prepared" archive FETCH_HEAD -- \
+            .github/workflows/main.tmp README.md client server \
+            docs/client-deployment.md docs/mygwd-release.md docs/rule-updates.md \
+            resource/client/Archive.zip resource/client/ui-script/ui-panel \
+            resource/client/ui-script/ui-updateSave resource/client/ui-web/update.php \
+            | tar -xf - -C "$working/overrides"
+
+          git -C "$working/prepared" -c http.extraHeader="$authorization" fetch --depth=1 "$destination" main
+          test "$(git -C "$working/prepared" rev-parse FETCH_HEAD)" = "$expected_main"
+          git -C "$working/prepared" checkout -q --detach FETCH_HEAD
+          git -C "$working/prepared" rm -qr --ignore-unmatch -- .
+
+          git init -q "$working/base"
+          git -C "$working/base" fetch --depth=1 https://github.com/XDcooler/de_GWD.git "$source_commit"
+          test "$(git -C "$working/base" rev-parse FETCH_HEAD)" = "$source_commit"
+          git -C "$working/base" archive FETCH_HEAD | tar -xf - -C "$working/prepared"
+          tar -C "$working/overrides" -cf - . | tar -xf - -C "$working/prepared"
+
+          cd "$working/prepared"
+          git add --all
+          test "$(git write-tree)" = "$expected_tree"
+          test "$(git ls-files | wc -l)" -eq 1849
+          bash -n client server resource/client/ui-script/ui-updateSave
+          python3 -B -m unittest discover -s tests -p test_client_updates.py -k PanelUpdateTests -v
+          python3 -B -m unittest discover -s tests -p test_regressions.py -k DistributionTests -v
+          git diff --cached --check
+
+          git -c user.name=XDcooler -c user.email=33934716+XDcooler@users.noreply.github.com \
+            -c commit.gpgsign=false commit -m 'Publish verified mygwd gateway with complete installation resources'
+          git -c http.extraHeader="$authorization" push "$destination" HEAD:refs/heads/main
+          printf 'Published %s with exact source tree %s\n' "$(git rev-parse HEAD)" "$expected_tree"

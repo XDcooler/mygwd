@@ -1,0 +1,667 @@
+#!/usr/bin/python3
+"""Root-owned, no-argument panel broker. Only named actions and validated JSON stdin."""
+import base64
+import contextlib
+import fcntl
+import grp
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import syslog
+import tempfile
+import time
+import uuid
+import zipfile
+
+ROOT = Path('/opt/de_GWD')
+CONFIG = ROOT/'0conf'
+PRIVATE = Path('/var/lib/de-gwd-panel')
+CONSOLE = Path('/run/de-gwd-console')
+UPDATES = Path('/var/lib/de-gwd-update')
+UPDATE_URL = 'https://raw.githubusercontent.com/XDcooler/mygwd/main/client'
+UPDATE_CMD = 'bash <(curl -fsSL '+UPDATE_URL+')'
+ENV = {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+       'HOME': '/root', 'LANG': 'C.UTF-8', 'DEBIAN_FRONTEND': 'noninteractive'}
+
+
+class Rejected(Exception):
+    pass
+
+
+def check(condition, message='Invalid management parameters'):
+    if not condition:
+        raise Rejected(message)
+
+
+def text(value, maximum=4096, empty=False):
+    check(isinstance(value, str) and len(value) <= maximum and (empty or bool(value)))
+    # Legacy helpers interpolate values into JSON/config files, so reject syntax
+    # that those helpers cannot represent safely. Never accept shell expressions.
+    check(not re.search(r'[\x00-\x1f\x7f\x22\x27`$;|<>\\]', value))
+    return value
+
+
+def host(value):
+    value = text(value, 253)
+    check(re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?', value) is not None)
+    return value
+
+
+def port(value):
+    check(isinstance(value, (str, int)) and str(value).isdigit() and 1 <= int(value) <= 65535)
+    return str(value)
+
+
+def address(value):
+    value = text(value, 260)
+    name, sep, number = value.partition(':')
+    host(name)
+    if sep:
+        port(number)
+    return value
+
+
+def ipv4(value):
+    check(isinstance(value, str))
+    return str(ipaddress.IPv4Address(value))
+
+
+def identifier(value):
+    check(isinstance(value, str))
+    return str(uuid.UUID(value))
+
+
+def lines(value):
+    check(isinstance(value, str) and len(value) <= 65536)
+    return [line.strip() for line in value.splitlines() if line.strip()]
+
+
+def array(value, maximum=512):
+    if value == '':
+        value = []  # jQuery omits empty arrays in form encoding.
+    if isinstance(value, dict) and all(str(k).isdigit() for k in value):
+        value = [value[k] for k in sorted(value, key=lambda k: int(k))]
+    check(isinstance(value, list) and len(value) <= maximum)
+    return value
+
+
+def node_list(value):
+    nodes = array(value)
+    check(bool(nodes), 'At least one node is required')
+    for node in nodes:
+        check(isinstance(node, dict) and set(node) <= {'domain', 'tls', 'name', 'uuid', 'path'})
+        address(node.get('domain'))
+        host(node.get('tls') or node['domain'].split(':')[0])
+        text(node.get('name'), 128)
+        identifier(node.get('uuid'))
+        path = text(node.get('path', ''), 2048, empty=True)
+        check(not path or path.startswith('/'))
+    return nodes
+
+
+def secure_tree(value, key=''):
+    """Validate restored/legacy configuration before privileged shell helpers see it."""
+    if key == 'updateCMD':
+        check(value == UPDATE_CMD, 'Only the official client update command is supported')
+    elif key == 'rules' and isinstance(value, list):
+        # Xray domain rules are emitted as a JSON array by jq, rather than
+        # interpolated as shell/config syntax. Preserve regex backslashes/$.
+        check(len(value) <= 4096 and all(isinstance(item,str) and len(item)<=2048
+              and not re.search(r'[\x00-\x1f\x7f]',item) for item in value))
+    elif isinstance(value, dict):
+        check(len(value) <= 4096)
+        for child, item in value.items():
+            check(isinstance(child, str) and re.fullmatch(r'[A-Za-z0-9_.:@/-]+', child) is not None)
+            secure_tree(item, child)
+    elif isinstance(value, list):
+        check(len(value) <= 4096)
+        for item in value:
+            secure_tree(item, key)
+    elif isinstance(value, str):
+        text(value, 65536, empty=True)
+    else:
+        check(value is None or isinstance(value, (bool, int, float)))
+
+
+def validate_config(config):
+    check(isinstance(config, dict))
+    secure_tree(config)
+    node_list(config.get('v2node'))
+    settings = config.get('address', {})
+    local = ipv4(settings.get('localIP'))
+    gateway = ipv4(settings.get('upstreamIP'))
+    network = ipaddress.IPv4Network(local+'/24', strict=False)
+    check(ipaddress.IPv4Address(gateway) in network and local != gateway)
+    check(ipaddress.IPv4Address(local) not in (network.network_address, network.broadcast_address))
+    check(re.fullmatch(r'[a-fA-F0-9]{64}', settings.get('PWD', '')) is not None)
+    if settings.get('serverName') and settings['serverName'] != 'de_GWD':
+        host(settings['serverName'])
+    if settings.get('alias'):
+        check(re.fullmatch(r'[\w .@()+-]+', settings['alias'], re.UNICODE) is not None)
+    for mount in (config.get('app', {}).get('NFS') or []):
+        check(isinstance(mount, dict))
+        host(mount.get('NFSserver'))
+        check(isinstance(mount.get('NFSpoint'), str) and mount['NFSpoint'].startswith(('/mnt/', '/media/')))
+        for key in ('NFSpoint', 'NFSaddress'):
+            check(isinstance(mount.get(key), str) and re.fullmatch(r'/[A-Za-z0-9_./-]+', mount[key]) is not None
+                  and '..' not in Path(mount[key]).parts)
+    return config
+
+
+def atomic(path, data, mode=0o600):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    check(not path.is_symlink(), 'Refusing symbolic-link destination')
+    fd, temporary = tempfile.mkstemp(prefix='.'+path.name+'.', dir=path.parent)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, 'wb') as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def save(config):
+    atomic(CONFIG, (json.dumps(config, ensure_ascii=False, indent=2)+'\n').encode())
+
+
+def set_value(config, path, value):
+    for key in path[:-1]:
+        if not isinstance(config.get(key), dict):
+            config[key] = {}
+        config = config[key]
+    config[path[-1]] = value
+
+
+def run(argv, timeout=120):
+    result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env=ENV, cwd='/root', timeout=timeout)
+    if result.returncode:
+        syslog.syslog(syslog.LOG_ERR, json.dumps({'component': 'panel', 'program': Path(argv[0]).name,
+                                                'exit': result.returncode}))
+        raise Rejected('Management command failed; inspect the system journal (exit '+str(result.returncode)+')')
+    return result.stdout.decode(errors='replace').strip()
+
+
+def helper(name, *args):
+    path = ROOT/('ui-'+name)
+    info = path.lstat()
+    check(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022,
+          'Management helper must be a root-owned, non-writable regular file')
+    # Preserve legacy optional lookups/fallbacks; capture the script's actual
+    # exit status without injecting errexit into previously non-errexit scripts.
+    return run(['/bin/bash', str(path), *map(str, args)])
+
+
+def node_index(params, name, config, clients=False, minimum=0):
+    value = params.get(name)
+    check(isinstance(value, (str, int)) and str(value).isdigit())
+    count = len(config.get('wireguard', {}).get('clients', [])) if clients else len(config['v2node'])-1
+    check(minimum <= int(value) <= count, 'Index out of range')
+    return str(value)
+
+
+def console_start(script):
+    allowed = {'update', 'ui-installCER', 'ui-installDocker', 'ui-installJellyfin', 'ui-installNFS',
+               'ui-installNetdata', 'ui-installMariaDB', 'ui-installFileRun', 'ui-installBitwarden', 'ui-installWG'}
+    check(script in allowed)
+    if script == 'update' and update_running():
+        # Reconnect to the existing worker log without starting another update.
+        if run(['/usr/bin/systemctl', 'show', 'updateGWD', '--property=ActiveState', '--value']) == 'active':
+            return '/ttyd/'
+    check(not (ROOT/script).is_symlink() and (ROOT/script).is_file(), 'Console command is unavailable')
+    check(run(['/usr/bin/systemctl', 'show', 'updateGWD', '--property=ActiveState', '--value'])
+          not in ('active', 'activating', 'deactivating'), 'Another management console is already running')
+    CONSOLE.mkdir(mode=0o750, parents=True, exist_ok=True)
+    shutil.chown(CONSOLE, user='root', group='www-data')
+    atomic(CONSOLE/'job.json', json.dumps({'script': script}).encode())
+    run(['/usr/bin/systemctl', 'start', 'updateGWD'])
+    # Start success must mean the protected socket is ready, not merely forked.
+    for _ in range(100):
+        if (CONSOLE/'terminal.sock').exists():
+            return '/ttyd/'
+        time.sleep(0.05)
+    run(['/usr/bin/systemctl', 'stop', 'updateGWD'])
+    raise Rejected('Management console failed to create its private socket')
+
+
+def update_running():
+    if (UPDATES/'update.lock').exists():
+        with (UPDATES/'update.lock').open('a') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+    state = subprocess.run(['/usr/bin/systemctl', 'is-active', '--quiet', 'de-gwd-update'],
+                           env=ENV, timeout=5, capture_output=True)
+    return state.returncode == 0
+
+
+def update_status():
+    try:
+        state = json.loads((UPDATES/'status.json').read_text())
+    except FileNotFoundError:
+        return {'status': 'idle', 'phase': '', 'exit_code': 0}
+    result = {key: state.get(key) for key in ('status', 'phase', 'exit_code', 'updated_at')}
+    if result['status'] == 'running' and not update_running():
+        result['status'] = 'interrupted'
+    return result
+
+
+def protect_configs():
+    web_group = grp.getgrnam('www-data').gr_gid
+    web_readable = {'vtrui', 'vtrui1', 'xDNSs', 'RproxyC', 'RproxyS'}
+    for path in (CONFIG, ROOT/'0conf_bak', *ROOT.glob('*/config.json')):
+        if path.is_file() and not path.is_symlink():
+            shared = path.parent.name in web_readable
+            os.chown(path, 0, web_group if shared else 0)
+            path.chmod(0o640 if shared else 0o600)
+
+
+def update_download():
+    check(not update_running(), 'An update is already running; check its status before retrying')
+    fd, temp = tempfile.mkstemp(prefix='.update.', dir=ROOT)
+    os.close(fd)
+    try:
+        run(['/usr/bin/curl', '--fail', '--location', '--proto', '=https', '--proto-redir', '=https',
+             '--connect-timeout', '15', '--max-time', '120', '--output', temp, UPDATE_URL], timeout=130)
+        data = Path(temp).read_bytes()
+        check(data.startswith(b'#!/bin/bash') and 10000 < len(data) < 2*1024*1024,
+              'Invalid official client update script')
+        run(['/bin/bash', '-n', temp])
+        os.chmod(temp, 0o700)
+        os.replace(temp, ROOT/'update')
+    finally:
+        Path(temp).unlink(missing_ok=True)
+
+
+def backup(kind):
+    directory = PRIVATE/'backups'
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for old in directory.iterdir():
+        if old.is_file() and time.time()-old.stat().st_mtime > 300:
+            old.unlink()
+    path = directory/('de_GWD_bak' if kind == 'config' else 'Bitwarden_bak.zip')
+    if kind == 'config':
+        atomic(path, CONFIG.read_bytes())
+    else:
+        check(Path('/opt/bitwarden').is_dir(), 'Bitwarden data directory is not installed')
+        with tempfile.TemporaryDirectory(dir=PRIVATE) as staging:
+            temp = Path(staging)/'backup.zip'
+            with zipfile.ZipFile(temp, 'w', zipfile.ZIP_DEFLATED) as archive:
+                for item in Path('/opt/bitwarden').rglob('*'):
+                    check(not item.is_symlink(), 'Backup contains a symbolic link')
+                    if item.is_file():
+                        archive.write(item, item.relative_to('/').as_posix())
+            os.chmod(temp, 0o600)
+            os.replace(temp, path)
+    return kind
+
+
+def perform(action, p, config):
+    if action == 'updateStatus':
+        return update_status()
+    if action == 'snapshot':
+        return config
+    if action == 'runtime':
+        paths = {'vtrui':ROOT/'vtrui/config.json','v2dns':ROOT/'v2dns/config.json',
+                 'RproxyS':ROOT/'RproxyS/config.json','RproxyC':ROOT/'RproxyC/config.json'}
+        check(p.get('target') in paths)
+        path = paths[p['target']]
+        return path.read_text() if path.is_file() else ''
+    raw_reads = {'checkEditionARM','checkNode','checkNodeCU','checkNodeDT','checkNodeNF',
+                 'checkNodeSS','checkUDP','checkDhcp','hostsCustomize','checkDDNS3322','checkDDNScf','checkFWD1'}
+    if action.startswith('raw') and action[3:] in raw_reads:
+        return helper(action[3:])
+    units = {'xDNSs','vtrui','vtrui1','RproxyS','RproxyC'}
+    if action.startswith('unit') and action[4:] in units:
+        return run(['/usr/bin/systemctl','show',action[4:],'--property=ActiveState','--value'])
+    if action == 'nfsstat':
+        return '\n'.join(line for line in run(['/usr/sbin/nfsstat','-m']).splitlines() if line.strip() and 'Flags' not in line)
+    if action in ('backup', 'backupBitwarden'):
+        return backup('config' if action == 'backup' else 'bitwarden')
+    if action == 'downloadBackup':
+        kind = p.get('kind')
+        check(kind in ('config', 'bitwarden'))
+        path = PRIVATE/'backups'/('de_GWD_bak' if kind == 'config' else 'Bitwarden_bak.zip')
+        check(path.is_file() and not path.is_symlink() and time.time()-path.stat().st_mtime < 300,
+              'Backup expired; create a new backup')
+        with path.open('rb') as source:
+            shutil.copyfileobj(source, sys.stdout.buffer)
+        path.unlink()
+        return None
+    if action == 'restore':
+        check(isinstance(p.get('data'), str) and len(p['data']) <= 2*1024*1024)
+        restored = json.loads(base64.b64decode(p['data'], validate=True))
+        validate_config(restored)
+        save(restored)
+        helper('restore')
+        return 'Restored'
+    if action == 'restoreBitwarden':
+        check(isinstance(p.get('data'), str) and len(p['data']) <= 48*1024*1024)
+        blob = base64.b64decode(p['data'], validate=True)
+        with tempfile.TemporaryDirectory(dir=PRIVATE) as staging:
+            source = Path(staging)/'upload.zip'
+            source.write_bytes(blob)
+            with zipfile.ZipFile(source) as archive:
+                check(sum(item.file_size for item in archive.infolist()) <= 512*1024*1024,
+                      'Expanded backup is too large')
+                for item in archive.infolist():
+                    path = Path(item.filename)
+                    check(not path.is_absolute() and '..' not in path.parts
+                          and not stat.S_ISLNK(item.external_attr >> 16)
+                          and (item.filename.startswith('opt/bitwarden/') or item.filename.startswith('opt/bitwardenrs/')),
+                          'Unsafe backup archive member')
+                archive.extractall(Path(staging)/'unpacked')
+            folder = Path(staging)/'unpacked/opt/bitwarden'
+            if not folder.is_dir():
+                folder = Path(staging)/'unpacked/opt/bitwardenrs'
+            check(folder.is_dir(), 'Missing Bitwarden data')
+            run(['/usr/bin/docker', 'stop', 'bitwarden'])
+            destination = Path('/opt/bitwarden')
+            old = Path('/opt/.bitwarden-panel-previous')
+            check(not old.exists(), 'Previous restore backup must be handled by an administrator')
+            try:
+                destination.rename(old)
+                shutil.copytree(folder, destination)
+                run(['/usr/bin/docker', 'start', 'bitwarden'])
+            except Exception:
+                if old.exists():
+                    shutil.rmtree(destination, ignore_errors=True)
+                    old.rename(destination)
+                    run(['/usr/bin/docker', 'start', 'bitwarden'])
+                raise
+        return 'Restored; previous data retained privately in /opt/.bitwarden-panel-previous'
+    if action == 'installZ':
+        run(['/usr/bin/systemctl', 'stop', 'updateGWD'])
+        if not update_running():
+            (ROOT/'update').unlink(missing_ok=True)
+        return 'Console stopped'
+    if action == 'updateSave':
+        # Never execute a command or download a URL supplied by a browser.
+        check(p.get('updateCMD') == UPDATE_CMD, 'Only the official client update command is supported')
+        address(p.get('updateAddr'))
+        port(p.get('updatePort'))
+        update_download()
+        set_value(config, ['update', 'updateAddr'], p['updateAddr'])
+        set_value(config, ['update', 'updatePort'], port(p['updatePort']))
+        set_value(config, ['update', 'updateCMD'], UPDATE_CMD)
+        save(config)
+        return '/ttyd/'
+    if action == 'updateRun':
+        check((ROOT/'update').is_file(), 'Download the official update first')
+        return console_start('update')
+    if action.startswith('install') and action in {'installDocker','installJellyfin','installNFS','installNetdata',
+                                                  'installMariaDB','installFileRun','installBitwarden','installWG'}:
+        return console_start('ui-'+action)
+    if action == 'WGqr':
+        number = node_index(p, 'WGnum', config, clients=True, minimum=1)
+        return Path('/etc/wireguard/client'+number+'.conf').read_text()
+    if action == 'getNFSlist':
+        return '\n'.join(run(['/usr/sbin/showmount', '-e', '--', host(p.get('NFSserver'))]).splitlines()[1:])
+    reads = {'checkCER':'check_ssl', 'checkDDNS3322':'checkDDNS3322', 'checkDDNScf':'checkDDNScf',
+             'checkDDNSip':'wanIP', 'checkWG':'checkWG', 'checkEditionARM':'checkEditionARM',
+             'pingTCPDOH1':'pingTCPDOH1', 'pingTCPDOH2':'pingTCPDOH2', 'pingTCPxDNS':'pingTCPxDNS'}
+    if action in reads:
+        value = helper(reads[action])
+        if action in ('checkDDNS3322','checkDDNScf'):
+            return 'installed' if value == 'success' else ''
+        if action == 'checkWG':
+            return ('installed ' if Path('/lib/systemd/system/wg-quick.target').exists() else '')+('on' if value == 'success' else '')
+        return value
+    if action in ('changeNode','changeNodeCU','changeNodeDT','changeNodeNF','pingTCP','speedT'):
+        field = {'changeNode':'nodenum','changeNodeCU':'nodeCUnum','changeNodeDT':'nodeDTnum',
+                 'changeNodeNF':'nodeNFnum','pingTCP':'pingTCP','speedT':'speedT'}[action]
+        return helper(action, node_index(p, field, config))
+    if action == 'WGgenCkey':
+        return helper(action, node_index(p, 'WGnum', config, clients=True))
+    if action == 'offWG':
+        return run(['/usr/bin/systemctl', 'disable', '--now', 'wg-quick@wg0'])
+
+    commands = []
+    def put(path, value):
+        set_value(config, path.split('.'), value)
+    if action == 'markThis':
+        value = text(p.get('markName'), 128)
+        check(re.fullmatch(r'[\w .@()+-]+', value, re.UNICODE) is not None)
+        put('address.alias', value)
+        commands = [('markThis',)]
+    elif action == 'saveNode':
+        put('v2node', node_list(p.get('nodeList', [])))
+        commands = [('saveNode',)]
+    elif action == 'changeNodeSS':
+        put('v2nodeDIV.ss', {'ssAddress':host(p.get('ssAddress')), 'ssPort':port(p.get('ssPort')),
+                            'ssMethod':text(p.get('ssMethod'),64), 'ssSecure':text(p.get('ssSecure'),1024)})
+        commands = [('changeNodeSS','r')]
+    elif action == 'changeNodeSS0':
+        put('v2nodeDIV.ss', {})
+        commands = [('changeNodeSS0',)]
+    elif action in ('NodeCUswitch','NodeDTswitch','NodeNFswitch'):
+        group = action[4:6]
+        value = p.get('switchNode'+group)
+        check(value in ('Node'+group+'show','Node'+group+'hide'))
+        commands = [(value,'r')]
+        if value.endswith('show') and group in ('CU','DT'):
+            commands.append(('Node'+group+('rules' if group=='CU' else 'ip'),'r'))
+    elif action == 'NodeCUswitchRules':
+        rules = lines(p.get('customDomain'))
+        check(all(len(value)<=2048 and not re.search(r'[\x00-\x1f\x7f]',value) for value in rules))
+        put('v2nodeDIV.nodeCU.rules', rules)
+        commands = [('NodeCUrules','r')]
+    elif action == 'NodeDTswitchIP':
+        rules = [str(ipaddress.IPv4Network(v, strict=False)) for line in lines(p.get('divertIP')) for v in line.split()]
+        put('v2nodeDIV.nodeDT.ip', rules)
+        commands = [('NodeDTip','r')]
+    elif action in ('block53on','block53off'):
+        put('FORWARD.block53', 'on' if action.endswith('on') else 'off')
+        commands = [(action,)]
+    elif action in ('onDHCP','offDHCP'):
+        if action == 'onDHCP':
+            first, last = ipv4(p.get('dhcpStart')), ipv4(p.get('dhcpEnd'))
+            check(int(ipaddress.IPv4Address(first)) <= int(ipaddress.IPv4Address(last)))
+            put('address.dhcpStart', first)
+            put('address.dhcpEnd', last)
+        put('address.dhcp', 'on' if action=='onDHCP' else 'off')
+        commands = [(action,)]
+    elif action == 'saveDNS':
+        dohs = []
+        for name in ('DoH1','DoH2'):
+            value = p.get(name,'')
+            if value:
+                check(isinstance(value,str) and value.endswith('/dq') and '://' not in value)
+                address(value[:-3])
+                dohs.append(value)
+        xdns = p.get('xDNSc','')
+        if xdns:
+            address(xdns)
+        china = lines(p.get('dnsChina',''))
+        for value in china:
+            for item in value.split():
+                address(item)
+        hosts = {}
+        for line in lines(p.get('hostsCustomize','')):
+            items = line.split()
+            check(len(items)==2)
+            hosts[host(items[1])] = str(ipaddress.ip_address(items[0]))
+        put('dns.xDNS', xdns)
+        put('dns.DOH', dohs)
+        put('dns.china', ' '.join(china))
+        put('dns.hosts', hosts)
+        commands = [('DNSsplit',),('saveSmartDNS',)]
+    elif action == 'saveListBW':
+        for name in ('listB','listW','listBlan','listWlan'):
+            values = [host(v) for v in lines(p.get(name,''))] if name in ('listB','listW') else [text(v,2048) for v in lines(p.get(name,''))]
+            if name in ('listBlan','listWlan'):
+                values = [str(ipaddress.IPv4Network(v,strict=False)) for v in values]
+            put(name, dict.fromkeys(values, '') if name in ('listB','listW') else values)
+        commands = [('DNSsplit',)]
+    elif action in ('onDDNS3322','onDDNScf','genCER'):
+        if action == 'onDDNS3322':
+            put('ddns.ddns3322', {'domain':host(p.get('f3322domain')), 'user':text(p.get('f3322usr'),256),
+                                 'pwd':text(p.get('f3322pwd'),1024)})
+            commands = [('ddns3322on',)]
+        else:
+            domain, key, email = host(p.get('CFdomain')), text(p.get('CFapikey'),1024), text(p.get('CFemail'),256)
+            check(re.fullmatch(r'[A-Za-z0-9_.+@-]+',email) is not None)
+            if action == 'genCER':
+                put('FORWARD.domain', domain)
+                put('FORWARD.APIkey', key)
+                put('FORWARD.Email', email)
+            else:
+                put('ddns.ddnsCF', {'cfDomain':domain,'cfAPIkey':key,'cfEmail':email})
+                commands = [('ddnsCFon',)]
+    elif action == 'onWG':
+        server = {'WGaddress':host(p.get('WGaddress')), 'WGport':port(p.get('WGport')),
+                  'sprivatekey':p.get('sprivatekey'), 'spublickey':p.get('spublickey')}
+        clients = array(p.get('WGclientsList',[]), 200)
+        for item in [server]+clients:
+            check(isinstance(item,dict))
+            for key, value in item.items():
+                if key.endswith('key'):
+                    check(isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9+/]{43}=',value) is not None)
+                elif key == 'mark':
+                    text(value,128,empty=True)
+        put('wireguard', {'server':server, 'clients':clients})
+        commands = [('onWG',)]
+    elif action in ('FWD0save','FWD1save'):
+        group = action[:4]
+        users = array(p.get(group+'uuidList',[]))
+        check(bool(users))
+        for user in users:
+            check(isinstance(user,dict))
+            identifier(user.get(group+'uuid'))
+            text(user.get(group+'mark',''),128,empty=True)
+        value = {'status':'on','port':port(p.get(group+'port')),'uuid':users}
+        if group == 'FWD1':
+            value['upstream'] = address(p.get('FWD1upstream'))
+        put('FORWARD.'+group, value)
+        commands = [(action,'r')] if group=='FWD0' else [(action,)]
+    elif action in ('FWD0stop','FWD1stop','xDNSsStop'):
+        put('FORWARD.'+('xDNSs' if action=='xDNSsStop' else action[:4])+'.status','off')
+        commands = [(action,)]
+    elif action == 'xDNSsSave':
+        put('FORWARD.xDNSs', {'status':'on','port':port(p.get('xDNSsPort'))})
+        commands = [(action,'r')]
+    elif action in ('RproxySsave','RproxyCsave'):
+        server = action == 'RproxySsave'
+        prefix = 'RproxyS' if server else 'RproxyC'
+        mapping = array(p.get(prefix+'1List',[]))
+        for item in mapping:
+            check(isinstance(item,dict))
+            port(item.get('port' if server else 'extPort'))
+            check(item.get('protocol' if server else 'extProtocol') in ('tcp','udp','tcp,udp'))
+            if not server:
+                ipv4(item.get('intIP'))
+                port(item.get('intPort'))
+        tunnel = {'uuid':identifier(p.get(prefix+'tunnelUUID'))}
+        tunnel['port' if server else 'address'] = port(p.get(prefix+'tunnelPort')) if server else address(p.get(prefix+'tunnelAddress'))
+        value = {'status':'on','tunnel':tunnel,'mapping':mapping,
+                 'mappingStatus':'on' if p.get(prefix+'mappingStatus')=='block' else 'off',
+                 ('inStatus' if server else 'outStatus'):'on' if p.get(prefix+('inStatus' if server else 'outStatus'))=='block' else 'off'}
+        if server:
+            users = array(p.get('RproxyS0uuidList',[]))
+            for user in users:
+                identifier(user.get('RproxyS0uuid'))
+                text(user.get('RproxyS0mark',''),128,empty=True)
+            value['inUUID'] = users
+        put('FORWARD.Rproxy.'+('server' if server else 'client'),value)
+        commands = [(action,)]
+    elif action in ('RproxySstop','RproxyCstop'):
+        put('FORWARD.Rproxy.'+('server' if action=='RproxySstop' else 'client')+'.status','off')
+        commands = [(action,)]
+    elif action == 'onNFS':
+        mounts = array(p.get('NFSlist',[]))
+        for item in mounts:
+            check(isinstance(item,dict))
+            host(item.get('NFSserver'))
+            for key in ('NFSpoint','NFSaddress'):
+                check(isinstance(item.get(key),str) and re.fullmatch(r'/[A-Za-z0-9_./-]+',item[key]) is not None
+                      and '..' not in Path(item[key]).parts)
+            check(item['NFSpoint'].startswith(('/mnt/','/media/')), 'NFS mounts must be below /mnt or /media')
+            check(str(Path(item['NFSpoint']).resolve()) == item['NFSpoint'], 'NFS mount path must not traverse symbolic links')
+        put('app.NFS',mounts)
+        commands = [(action,)]
+    elif action == 'offNFS':
+        mount = p.get('NFSpoint')
+        check(any(item.get('NFSpoint')==mount for item in config.get('app',{}).get('NFS',[])), 'Unknown NFS mount')
+        commands = [(action,mount)]
+    elif action == 'reboot':
+        put('address.localIP',ipv4(p.get('localip')))
+        put('address.upstreamIP',ipv4(p.get('upstreamip')))
+        validate_config(config)
+        commands = [(action,)]
+    else:
+        fixed = {'proxyStop':('proxyStop',), 'proxyRestart':('proxyRestart',), 'clearDNS':('DNSclear',),
+                 'offDDNS3322':('ddns3322off',), 'offDDNScf':('ddnsCFoff',), 'WGgenSkey':('WGgenSkey',),
+                 'onAPPLE':('onAPPLE','r'), 'offAPPLE':('offAPPLE','r'),
+                 'onUDP':('onUDP','r'), 'offUDP':('offUDP','r'), 'NodeOne':('NodeOne','f','r')}
+        check(action in fixed, 'Unsupported management action')
+        commands = [fixed[action]]
+    validate_config(config)
+    save(config)
+    output = ''
+    for command in commands:
+        output = helper(*command)
+    if action in ('saveDNS','saveListBW','saveNode'):
+        run(['/usr/bin/systemctl','restart','v2dns'])
+    if action == 'saveDNS':
+        run(['/usr/bin/systemctl','restart','pihole-FTL'])
+    if action in ('NodeCUswitch','NodeDTswitch','NodeNFswitch'):
+        applied = json.loads(CONFIG.read_text())
+        output = helper('checkNode'+action[4:6]) if applied.get('v2nodeDIV',{}).get('node'+action[4:6],{}).get('display')=='on' else ''
+    if action == 'genCER':
+        return console_start('ui-installCER')
+    if action in ('changeNodeSS','changeNodeSS0','NodeCUswitch','NodeDTswitch','NodeNFswitch','NodeOne') and Path('/etc/nginx/conf.d/forward0.conf').exists():
+        helper('FWD0save','r')
+    return output
+
+
+def main():
+    check(os.geteuid()==0 and len(sys.argv)==1, 'Root broker takes no command-line arguments')
+    os.umask(0o077)
+    PRIVATE.mkdir(mode=0o700,parents=True,exist_ok=True)
+    request = json.loads(sys.stdin.buffer.read(50*1024*1024+1))
+    check(isinstance(request,dict) and set(request) <= {'action','params'})
+    action, params = request.get('action'), request.get('params',{})
+    if params == []:
+        params = {}  # Older PHP callers encode an empty parameter map as [].
+    check(isinstance(action,str) and re.fullmatch(r'[A-Za-z0-9]+',action) is not None and isinstance(params,dict))
+    with (PRIVATE/'management.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if action == 'updateStatus':
+            print(json.dumps({'ok': True, 'result': update_status()}, ensure_ascii=False))
+            return
+        config = json.loads(CONFIG.read_text())
+        before = CONFIG.read_bytes()
+        try:
+            result = perform(action,params,config)
+        except Exception:
+            # Restore the saved configuration, without claiming external service
+            # changes have been undone; the HTTP response explicitly reports failure.
+            if action not in ('snapshot','downloadBackup') and CONFIG.read_bytes()!=before:
+                atomic(CONFIG,before)
+            raise
+        finally:
+            protect_configs()
+        if action!='downloadBackup':
+            print(json.dumps({'ok':True,'result':result},ensure_ascii=False))
+        if action!='snapshot':
+            syslog.syslog(syslog.LOG_INFO,json.dumps({'component':'panel','action':action,'exit':0}))
+
+
+if __name__=='__main__':
+    try:
+        main()
+    except (Rejected,ValueError,KeyError,TypeError,OSError,subprocess.SubprocessError) as error:
+        message = str(error) if isinstance(error,Rejected) else 'Management operation failed; inspect the system journal'
+        syslog.syslog(syslog.LOG_ERR,json.dumps({'component':'panel','event':'rejected','type':type(error).__name__}))
+        print(json.dumps({'ok':False,'error':message}),file=sys.stderr)
+        sys.exit(1)
