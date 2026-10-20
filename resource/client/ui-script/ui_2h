@@ -1,0 +1,31 @@
+#!/bin/bash
+rm -rf /opt/de_GWD/update
+rm -rf ~/client*
+rm -rf ~/wget-log*
+rm -rf /wget-log*
+rm -rf /var/log/*1*
+rm -rf /var/log/*2*
+rm -rf /var/log/*.gz
+rm -rf /var/www/html/log.log
+rm -rf /var/www/html/restore/*
+rm -rf /opt/de_GWD/__MACOSX
+rm -rf /var/www/html/__MACOSX
+rm -rf /netdata-updater.log*
+rm -rf /tmp/systemd-private-*
+rm -rf /tmp/tmp.*
+
+sed -i '/^\s*$/d' /opt/de_GWD/0conf
+if [[ -n $(cat /opt/de_GWD/0conf) ]]; then
+	cp -f /opt/de_GWD/0conf /opt/de_GWD/0conf_bak
+elif [[ -z $(cat /opt/de_GWD/0conf) ]]; then
+	cp -f /opt/de_GWD/0conf_bak /opt/de_GWD/0conf
+	chmod 600 /opt/de_GWD/0conf
+fi
+
+# Private panel artifacts are never publicly served; also remove expired copies.
+if [[ -d /var/lib/de-gwd-panel/backups ]]; then
+    find /var/lib/de-gwd-panel/backups -maxdepth 1 -type f -mmin +5 -delete
+fi
+if [[ -d /var/lib/de-gwd-auth ]]; then
+    find /var/lib/de-gwd-auth -maxdepth 1 -type f -mmin +1440 -delete
+fi

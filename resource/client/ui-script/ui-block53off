@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+root=${DE_GWD_ROOT:-/opt/de_GWD}
+exec 8>"$root/.proxy-config.lock"
+flock -x 8
+mode=tcp
+[[ $(jq -r '.address.udp // "off"' "$root/0conf") != on ]] || mode=tcpudp
+"$root/ui-proxyRules" check "$mode"
+config=$(mktemp "$root/.block53-config.XXXXXX")
+trap 'rm -f "$config"' EXIT
+jq '.FORWARD.block53="off"' "$root/0conf" >"$config"
+chmod --reference="$root/0conf" "$config"
+mv -f "$config" "$root/0conf"
+systemctl restart iptables-proxy

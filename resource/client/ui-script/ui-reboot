@@ -1,0 +1,29 @@
+#!/bin/bash
+set -euo pipefail
+# Apply the same /24 static-network model as the installer. Never purge kernels.
+python3 - <<'PY'
+import ipaddress,json,re,subprocess
+from pathlib import Path
+config=json.loads(Path('/opt/de_GWD/0conf').read_text())['address']
+local=str(ipaddress.IPv4Address(config['localIP']))
+gateway=str(ipaddress.IPv4Address(config['upstreamIP']))
+network=ipaddress.IPv4Network(local+'/24',strict=False)
+if local==gateway or ipaddress.IPv4Address(gateway) not in network:
+    raise SystemExit('Invalid client network')
+routes=json.loads(subprocess.check_output(['ip','-j','-4','route','show','default']))
+if not routes:
+    raise SystemExit('No default network interface')
+interface=routes[0]['dev']
+if re.fullmatch(r'[A-Za-z0-9_.:-]+',interface) is None:
+    raise SystemExit('Invalid interface name')
+if subprocess.run(['systemctl','is-active','--quiet','systemd-networkd']).returncode==0:
+    folder=Path('/etc/systemd/network')
+    folder.mkdir(parents=True,exist_ok=True)
+    (folder/'05-de-gwd-client.network').write_text(
+        f'[Match]\nName={interface}\n[Network]\nDHCP=no\nAddress={local}/24\nGateway={gateway}\nDNS=127.0.0.1\nIPv6AcceptRA=no\n')
+else:
+    Path('/etc/network/interfaces').write_text(
+        f'source /etc/network/interfaces.d/*\nauto lo\niface lo inet loopback\nauto {interface}\niface {interface} inet static\naddress {local}\nnetmask 255.255.255.0\ngateway {gateway}\n')
+subprocess.run(['systemd-run','--unit=de-gwd-panel-reboot','--on-active=3s',
+                '/usr/bin/systemctl','reboot'],check=True)
+PY

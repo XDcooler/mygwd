@@ -1,0 +1,196 @@
+#!/bin/bash
+# Own only de_GWD chains, marks and sets; leave the host firewall intact.
+set -euo pipefail
+root=${DE_GWD_ROOT:-/opt/de_GWD}
+run_directory=${DE_GWD_RUN_DIRECTORY:-/run}
+operation=${1:-}
+mode=${2:-tcp}
+[[ $operation == up || $operation == check || $operation == down ]] || { echo 'Usage: ui-proxyRules {up|check} [tcp|tcpudp] | down' >&2; exit 2; }
+[[ $mode == tcp || $mode == tcpudp ]] || exit 2
+[[ $(id -u) == 0 ]] || { echo 'Transparent proxy rules require root.' >&2; exit 1; }
+for command in ip iptables ipset flock; do
+    command -v "$command" >/dev/null || { echo "Missing transparent proxy dependency: $command" >&2; exit 1; }
+done
+# A container may run as root without permission to manage its network namespace.
+iptables -t mangle -S >/dev/null
+iptables -t filter -S >/dev/null
+ipset list -n >/dev/null
+mkdir -p "$run_directory"
+exec 9>"$run_directory/de_GWD-proxy.lock"
+flock -x 9
+
+delete_rule() {
+    local table=$1 chain=$2
+    shift 2
+    while iptables -t "$table" -C "$chain" "$@" 2>/dev/null; do
+        iptables -t "$table" -D "$chain" "$@" || return
+    done
+}
+
+cleanup() {
+    # Remove only our jumps. Also recognize rules from the former templates.
+    delete_rule filter INPUT -j DE_GWD_INPUT
+    delete_rule mangle PREROUTING -j DE_GWD_PREROUTING
+    delete_rule mangle OUTPUT -j DE_GWD_OUTPUT
+    local protocol chain table set_name
+    for protocol in tcp udp; do
+        delete_rule mangle PREROUTING -p "$protocol" -m mark ! --mark 0x9 -j V2PROXY
+        delete_rule mangle PREROUTING -p "$protocol" -j TPROXY --on-ip 127.0.0.1 --on-port 9896 --tproxy-mark 0x9
+        delete_rule mangle OUTPUT -p "$protocol" -j V2PROXY
+    done
+    for chain in DE_GWD_PREROUTING DE_GWD_OUTPUT V2PROXY DE_GWD_INPUT; do
+        table=mangle
+        [[ $chain != DE_GWD_INPUT ]] || table=filter
+        if iptables -t "$table" -S "$chain" >/dev/null 2>&1; then
+            iptables -t "$table" -F "$chain"
+            iptables -t "$table" -X "$chain"
+        fi
+    done
+    # Match our reserved rule exactly; do not flush a shared routing table.
+    ip rule del fwmark 0x9/0xff table 220 priority 100 2>/dev/null || true
+    ip rule del fwmark 0x9 table 220 priority 100 2>/dev/null || true
+    ip route del local default dev lo table 220 2>/dev/null || true
+    for set_name in lanip chnroute doh v2node listB listW listBlan listWlan gwdConsole gwdService; do
+        ipset destroy "$set_name" 2>/dev/null || true
+    done
+}
+
+if [[ $operation == down ]]; then
+    cleanup
+    exit
+fi
+for command in ss systemctl jq python3; do
+    command -v "$command" >/dev/null || { echo "Missing transparent proxy dependency: $command" >&2; exit 1; }
+done
+listener_ready() {
+    systemctl is-active --quiet vtrui || return 1
+    [[ -n $(ss -H -lnt '( sport = :9896 )') ]] || return 1
+    [[ $mode == tcp ]] || [[ -n $(ss -H -lnu '( sport = :9896 )') ]]
+}
+# Type=simple becomes active before Xray has finished opening its listeners.
+for ((attempt=0; attempt<50; attempt++)); do
+    if listener_ready; then break; fi
+    sleep 0.1
+done
+systemctl is-active --quiet vtrui || { echo 'Xray vtrui is not active; transparent proxy rules were not changed.' >&2; exit 1; }
+listener_ready || { echo 'Xray port 9896 is not listening for the requested transports; transparent proxy rules were not changed.' >&2; exit 1; }
+[[ -s $root/chnrouteSET ]] || { echo 'China route data is missing; transparent proxy rules were not changed.' >&2; exit 1; }
+# Validate every source before removing working rules or flushing live sets.
+python3 - "$root" <<'PY_PROXY_VALIDATE'
+import ipaddress
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+sources = {'chnrouteSET': 'chnroute', 'IPxDNSSET': 'doh', 'IPv2nodeSET': 'v2node',
+           'IPlistBSET': 'listB', 'IPlistWSET': 'listW',
+           'IPlistBlanSET': 'listBlan', 'IPlistWlanSET': 'listWlan',
+           'IPconsoleSET': 'gwdConsole', 'IPserviceSET': 'gwdService'}
+try:
+    for filename, target in sources.items():
+        source = root/filename
+        if not source.exists():
+            continue
+        addresses = set()
+        for line in source.read_text().splitlines():
+            parts = line.split('#', 1)[0].split()
+            if not parts:
+                continue
+            if len(parts) != 3 or parts[:2] != ['add', target]:
+                raise ValueError('Invalid ipset record in ' + filename)
+            address = ipaddress.ip_network(parts[2], strict=True) if target in ('chnroute', 'gwdService') else ipaddress.ip_address(parts[2])
+            if address.version != 4:
+                raise ValueError('Expected IPv4 data in ' + filename)
+            addresses.add(address)
+        if target == 'chnroute' and not addresses:
+            raise ValueError('Empty China route data')
+        if len(addresses) > (100000 if target == 'chnroute' else 65536):
+            raise ValueError('Too many addresses in ' + filename)
+except (OSError, ValueError) as error:
+    sys.exit('Transparent proxy data validation failed: ' + str(error))
+PY_PROXY_VALIDATE
+interface=$(ip -o route show default | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')
+[[ -n $interface ]] || { echo 'No default network interface; transparent proxy rules were not changed.' >&2; exit 1; }
+[[ $operation != check ]] || exit 0
+
+rollback() {
+    local status=$?
+    if (( status != 0 )); then
+        trap - EXIT
+        set +e
+        cleanup
+        echo 'Transparent proxy setup failed; partial de_GWD rules were removed.' >&2
+    fi
+    exit "$status"
+}
+trap rollback EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+cleanup
+
+ipset create lanip hash:net family inet -exist
+for network in 0.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4 114.114.114.114/32 114.114.115.115/32 119.29.29.29/32 119.28.28.28/32 182.254.118.118/32 223.5.5.5/32 223.6.6.6/32; do
+    ipset add lanip "$network" -exist
+done
+ipset create chnroute hash:net family inet hashsize 4096 maxelem 100000 -exist
+ipset flush chnroute
+ipset restore -exist <"$root/chnrouteSET"
+for specification in 'doh IPxDNSSET' 'v2node IPv2nodeSET' 'listB IPlistBSET' 'listW IPlistWSET' 'listBlan IPlistBlanSET' 'listWlan IPlistWlanSET'; do
+    read -r set_name filename <<<"$specification"
+    ipset create "$set_name" hash:ip family inet -exist
+    ipset flush "$set_name"
+    [[ ! -f $root/$filename ]] || ipset restore -exist <"$root/$filename"
+done
+# Dedicated service networks and console source addresses have their own sets.
+ipset create gwdService hash:net family inet -exist
+ipset flush gwdService
+[[ ! -f $root/IPserviceSET ]] || ipset restore -exist <"$root/IPserviceSET"
+ipset create gwdConsole hash:ip family inet -exist
+ipset flush gwdConsole
+[[ ! -f $root/IPconsoleSET ]] || ipset restore -exist <"$root/IPconsoleSET"
+ip rule add fwmark 0x9/0xff table 220 priority 100
+ip route replace local default dev lo table 220
+
+iptables -t filter -N DE_GWD_INPUT
+iptables -t mangle -N DE_GWD_PREROUTING
+iptables -t mangle -N DE_GWD_OUTPUT
+iptables -t mangle -N V2PROXY
+for port in 5310 5311 5320 5321 5330 5350 4711 9896; do
+    for protocol in udp tcp; do
+        iptables -t filter -A DE_GWD_INPUT -p "$protocol" --dport "$port" -i "$interface" -j DROP
+    done
+done
+if [[ -f $root/0conf ]] && [[ $(jq -r '.FORWARD.block53 // "off"' "$root/0conf") == on ]]; then
+    for protocol in udp tcp; do
+        iptables -t filter -A DE_GWD_INPUT -p "$protocol" --dport 53 -i "$interface" -j DROP
+    done
+fi
+# The proxy's own outbound sockets must always escape interception.
+iptables -t mangle -A V2PROXY -m mark --mark 0xff -j RETURN
+for set_name in doh v2node; do
+    iptables -t mangle -A V2PROXY -m set --match-set "$set_name" dst -j RETURN
+done
+iptables -t mangle -A V2PROXY -m set --match-set listBlan src -j MARK --set-mark 0x9
+iptables -t mangle -A V2PROXY -m mark --mark 0x9 -j RETURN
+iptables -t mangle -A V2PROXY -m set --match-set listWlan src -j RETURN
+iptables -t mangle -A V2PROXY -m set --match-set lanip dst -j RETURN
+# Private destinations stay local; console and service selections override China bypass.
+iptables -t mangle -A V2PROXY -m set --match-set gwdConsole src -j MARK --set-mark 0x9
+iptables -t mangle -A V2PROXY -m set --match-set gwdService dst -j MARK --set-mark 0x9
+iptables -t mangle -A V2PROXY -m mark --mark 0x9 -j RETURN
+iptables -t mangle -A V2PROXY -m set --match-set listB dst -j MARK --set-mark 0x9
+iptables -t mangle -A V2PROXY -m mark --mark 0x9 -j RETURN
+for set_name in listW chnroute; do
+    iptables -t mangle -A V2PROXY -m set --match-set "$set_name" dst -j RETURN
+done
+protocols=(tcp)
+[[ $mode != tcpudp ]] || protocols+=(udp)
+for protocol in "${protocols[@]}"; do
+    iptables -t mangle -A V2PROXY -p "$protocol" -j MARK --set-mark 0x9
+    iptables -t mangle -A DE_GWD_PREROUTING -p "$protocol" -m mark ! --mark 0x9 -j V2PROXY
+    iptables -t mangle -A DE_GWD_PREROUTING -p "$protocol" -m mark --mark 0x9 -j TPROXY --on-ip 127.0.0.1 --on-port 9896 --tproxy-mark 0x9
+    iptables -t mangle -A DE_GWD_OUTPUT -p "$protocol" -j V2PROXY
+done
+iptables -t filter -A INPUT -j DE_GWD_INPUT
+iptables -t mangle -A PREROUTING -j DE_GWD_PREROUTING
+iptables -t mangle -A OUTPUT -j DE_GWD_OUTPUT
+trap - EXIT

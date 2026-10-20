@@ -1,0 +1,191 @@
+#!/bin/bash
+clear
+red()    { echo -e "\033[31m\033[01m $1 \033[0m"; }
+green()  { echo -e "\033[32m\033[01m $1 \033[0m"; }
+yellow() { echo -e "\033[33m\033[01m $1 \033[0m"; }
+blue()   { echo -e "\033[34m\033[01m $1 \033[0m"; }
+cyan()   { echo -e "\033[36m\033[01m $1 \033[0m"; }
+white()  { echo -e "\033[37m\033[01m $1 \033[0m"; }
+architecture=$(dpkg --print-architecture)
+stl_thumb_Ver="0.4.0"
+
+
+
+installFileRun(){
+[[ -z $(dpkg -l | grep ' mariadb-server ') ]] && red "Install MariaDB first." && return
+
+local fileRunPackage=${DE_GWD_FILERUN_PACKAGE:-} loaderArchitecture
+[[ -f $fileRunPackage ]] && unzip -tq "$fileRunPackage" >/dev/null 2>&1 || {
+    red "Provide a current licensed PHP 8.4 FileRun ZIP via DE_GWD_FILERUN_PACKAGE. No files were changed."
+    return 1
+}
+case "$architecture" in amd64) loaderArchitecture=x86-64;; arm64) loaderArchitecture=aarch64;; *) return 1;; esac
+apt-get update && apt-get install -y php8.4-mysql php8.4-mbstring php8.4-curl php8.4-zip php8.4-gd php8.4-ldap php8.4-xml php8.4-opcache php8.4-imagick pngquant imagemagick ffmpeg \
+libdrm-dev libosmesa6 libosmesa6-dev libpthread-stubs0-dev libx11-dev libxau-dev libxcb1-dev libxdmcp-dev x11proto-core-dev x11proto-dev xorg-sgml-doctools xtrans-dev mesa-common-dev libreoffice
+[[ $? -ne 0 ]] && rm -rf /var/lib/apt/lists/lock
+
+curl -fsSL --proto '=https' --proto-redir '=https' "https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_${loaderArchitecture}.zip" -o /tmp/ioncube_loaders_lin.zip || return 1
+if [[ $(unzip -tq /tmp/ioncube_loaders_lin.zip 2>/dev/null) =~ "No errors" ]]; then
+unzip -Z1 /tmp/ioncube_loaders_lin.zip | grep -qx 'ioncube/ioncube_loader_lin_8.4.so' || { red "PHP 8.4 loader missing"; return 1; }
+rm -rf /usr/local/ioncube
+unzip /tmp/ioncube_loaders_lin.zip -d /usr/local >/dev/null 2>&1
+
+sed -i "/zend_extension/d" /etc/php/8.4/fpm/php.ini
+echo "zend_extension=/usr/local/ioncube/ioncube_loader_lin_8.4.so" >>/etc/php/8.4/fpm/php.ini
+
+sed -i "/zend_extension/d" /etc/php/8.4/cli/php.ini
+echo "zend_extension=/usr/local/ioncube/ioncube_loader_lin_8.4.so" >>/etc/php/8.4/cli/php.ini
+else
+red "Download Failed"
+return 1
+fi
+
+cat << EOF >/etc/nginx/conf.d/filerun.conf
+server {
+  listen 10501 ssl http2 fastopen=128 reuseport;
+  root /var/www/html/filerun;
+  index index.php index.html index.htm;
+
+  ssl_certificate /var/www/ssl/de_GWD.cer;
+  ssl_certificate_key /var/www/ssl/de_GWD.key;
+
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_prefer_server_ciphers on;
+  ssl_ciphers  '[ECDHE-ECDSA-AES128-GCM-SHA256|ECDHE-ECDSA-CHACHA20-POLY1305|ECDHE-RSA-AES128-GCM-SHA256|ECDHE-RSA-CHACHA20-POLY1305] ECDHE-ECDSA-AES256-GCM-SHA384 ECDHE-RSA-AES256-GCM-SHA384 ECDHE-ECDSA-AES128-SHA256 ECDHE-RSA-AES128-SHA256';
+  ssl_session_timeout 10m;
+  ssl_session_cache builtin:1000 shared:SSL:10m;
+  ssl_buffer_size 4k;
+
+  ssl_early_data on;
+  proxy_set_header Early-Data \$ssl_early_data;
+  
+  add_header Referrer-Policy                    "no-referrer"       always;
+  add_header X-Content-Type-Options             "nosniff"           always;
+  add_header X-Download-Options                 "noopen"            always;
+  add_header X-Frame-Options                    "SAMEORIGIN"        always;
+  add_header X-Permitted-Cross-Domain-Policies  "none"              always;
+  add_header X-Robots-Tag                       "none"              always;
+  add_header X-XSS-Protection                   "1; mode=block"     always;
+  add_header Strict-Transport-Security          "max-age=63072000"  always;
+
+
+  client_max_body_size        20000M;
+
+location ~ [^/]\.php(/|$) {
+  fastcgi_split_path_info ^(.+?\.php)(/.*)$;
+  include fastcgi_params;
+
+  fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+  fastcgi_param PATH_INFO \$fastcgi_path_info;
+  fastcgi_param HTTPS on;
+
+  #Avoid sending the security headers twice
+  fastcgi_param modHeadersAvailable true;
+  fastcgi_param front_controller_active true;
+  fastcgi_intercept_errors on;
+  fastcgi_request_buffering off;
+
+  fastcgi_pass        unix:/run/php/php8.4-fpm.sock;
+}
+}
+EOF
+
+rm -rf /var/www/html/filerun
+mkdir -p /var/www/html/filerun
+cp -- "$fileRunPackage" /var/www/html/filerun/FileRun.zip || return 1
+if [[ $(unzip -tq /var/www/html/filerun/FileRun.zip 2>/dev/null) =~ "No errors" ]]; then
+unzip /var/www/html/filerun/FileRun.zip -d /var/www/html/filerun >/dev/null
+rm -f /var/www/html/filerun/FileRun.zip
+chown -R www-data:www-data /var/www/html/filerun
+
+cat << "EOF" >/tmp/filerunRestart
+#!/bin/bash
+systemctl restart php8.4-fpm
+systemctl force-reload nginx
+rm -rf /tmp/filerunRestart
+EOF
+chmod +x /tmp/filerunRestart
+screen -dmS filerunRestart /tmp/filerunRestart
+
+blue  "--------------------------------------------------"
+green "FileRun thumbs and previews support"
+echo
+blue "FFmpeg:      $(yellow "/usr/bin/ffmpeg")"
+blue "LibreOffice: $(yellow "soffice")"
+blue "stl-thumb:   $(yellow "/usr/bin/stl-thumb")"
+blue "pngquant:    $(yellow "/usr/bin/pngquant")"
+echo
+blue  "--------------------------------------------------"
+
+else
+red "Download Failed"
+return 1
+fi
+
+blue "----------------------"
+blue "Install FileRun [done]"
+blue "----------------------"
+}
+
+
+
+uninstallFileRun(){
+rm -rf /var/www/html/filerun
+
+rm -rf /etc/nginx/conf.d/filerun.conf
+
+sed -i "/zend_extension/d" /etc/php/8.4/fpm/php.ini
+sed -i "/zend_extension/d" /etc/php/8.4/cli/php.ini
+rm -rf /usr/local/ioncube
+
+dpkg -r stl-thumb
+
+rm -rf /usr/share/fonts/truetype/libreoffice
+
+apt purge libdrm-dev libosmesa6 libosmesa6-dev libpthread-stubs0-dev libx11-dev libxau-dev libxcb1-dev libxdmcp-dev x11proto-core-dev x11proto-dev xorg-sgml-doctools xtrans-dev mesa-common-dev libreoffice
+
+apt autoremove && apt autoclean
+
+cat << "EOF" >/tmp/filerunRestart
+#!/bin/bash
+systemctl restart php8.4-fpm
+systemctl force-reload nginx
+rm -rf /tmp/filerunRestart
+EOF
+chmod +x /tmp/filerunRestart
+screen -dmS filerunRestart /tmp/filerunRestart
+
+blue "------------------------"
+blue "Uninstall FileRun [done]"
+blue "------------------------"
+}
+
+
+
+start_menu(){
+    green "==============================="
+    green "         FileRun"
+    green "==============================="
+    green  "1. Install FileRun"
+    yellow "2. Uninstall FileRun"
+    echo ""
+    read -p "Select:" num
+    case "$num" in
+    1)
+    installFileRun
+    start_menu
+    ;;
+    2)
+    uninstallFileRun
+    start_menu
+    ;;
+    *)
+    clear
+    red "Wrong number"
+    sleep 1s
+    start_menu
+    ;;
+    esac
+}
+
+start_menu

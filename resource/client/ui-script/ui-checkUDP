@@ -1,0 +1,11 @@
+#!/bin/bash
+set -uo pipefail
+root=${DE_GWD_ROOT:-/opt/de_GWD}
+if [[ $(jq -r '.address.udp // "off"' "$root/0conf" 2>/dev/null) == on ]] \
+    && systemctl is-active --quiet iptables-proxy \
+    && iptables -t mangle -C DE_GWD_PREROUTING -p udp -m mark --mark 0x9 \
+        -j TPROXY --on-ip 127.0.0.1 --on-port 9896 --tproxy-mark 0x9 >/dev/null 2>&1; then
+	echo "success"
+else
+	echo "outline-secondary"
+fi

@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "categories": [
+    {"id": "streaming", "name": "流媒体", "description": "视频、音乐与直播，按服务选择出口节点"},
+    {"id": "ai", "name": "AI 服务", "description": "对话、开发助手和模型平台"},
+    {"id": "gaming", "name": "游戏与主机", "description": "平台域名分流，也可按主机固定 IP 指定全部公网流量"}
+  ],
+  "services": [
+    {"id":"netflix","name":"Netflix","category":"streaming","geosite":["netflix"],"geoip":["netflix"],"domains":["netflix.com","nflxvideo.net","nflximg.net","nflxso.net","nflxext.com"]},
+    {"id":"disney","name":"Disney+","category":"streaming","geosite":["disney"],"domains":["disneyplus.com","disney-plus.net","dssott.com","bamgrid.com"]},
+    {"id":"youtube","name":"YouTube / YouTube Music","category":"streaming","geosite":["youtube"],"domains":["youtube.com","youtu.be","googlevideo.com","ytimg.com","youtubei.googleapis.com"]},
+    {"id":"primevideo","name":"Prime Video","category":"streaming","geosite":["primevideo"],"domains":["primevideo.com","aiv-cdn.net","aiv-delivery.net","amazonvideo.com"]},
+    {"id":"max","name":"HBO / Max","category":"streaming","geosite":["hbo"],"domains":["max.com","hbomax.com","hbo.com","hbonow.com"]},
+    {"id":"appletv","name":"Apple TV+","category":"streaming","geosite":["apple-tvplus"],"domains":["tv.apple.com","tvapp.apple.com","play-edge.itunes.apple.com"]},
+    {"id":"spotify","name":"Spotify","category":"streaming","geosite":["spotify"],"domains":["spotify.com","scdn.co","spotifycdn.com"]},
+    {"id":"hulu","name":"Hulu","category":"streaming","geosite":["hulu"],"domains":["hulu.com","huluim.com","hulustream.com"]},
+    {"id":"twitch","name":"Twitch","category":"streaming","geosite":["twitch"],"domains":["twitch.tv","ttvnw.net","jtvnw.net"]},
+    {"id":"paramount","name":"Paramount+","category":"streaming","geosite":[],"domains":["paramountplus.com","cbsi.com","cbsivideo.com","pplusstatic.com"]},
+    {"id":"peacock","name":"Peacock","category":"streaming","geosite":[],"domains":["peacocktv.com","peacocktv.net"]},
+    {"id":"crunchyroll","name":"Crunchyroll","category":"streaming","geosite":[],"domains":["crunchyroll.com","vrv.co"]},
+    {"id":"openai","name":"OpenAI / ChatGPT","category":"ai","geosite":["openai"],"domains":["openai.com","chatgpt.com","oaistatic.com","oaiusercontent.com"]},
+    {"id":"anthropic","name":"Anthropic / Claude","category":"ai","geosite":["anthropic"],"domains":["anthropic.com","claude.ai","claude.com"]},
+    {"id":"gemini","name":"Google Gemini / AI Studio","category":"ai","geosite":["google-gemini"],"domains":["gemini.google.com","aistudio.google.com","generativelanguage.googleapis.com","makersuite.google.com"]},
+    {"id":"copilot","name":"Microsoft Copilot","category":"ai","geosite":[],"domains":["copilot.microsoft.com","copilot.cloud.microsoft","sydney.bing.com","edgeservices.bing.com"]},
+    {"id":"github-copilot","name":"GitHub Copilot","category":"ai","geosite":["github-copilot"],"domains":["githubcopilot.com","copilot-proxy.githubusercontent.com","copilot-telemetry.githubusercontent.com"]},
+    {"id":"perplexity","name":"Perplexity","category":"ai","geosite":["perplexity"],"domains":["perplexity.ai","pplx.ai"]},
+    {"id":"xai","name":"xAI / Grok","category":"ai","geosite":["xai"],"domains":["x.ai","grok.com"]},
+    {"id":"huggingface","name":"Hugging Face","category":"ai","geosite":["huggingface"],"domains":["huggingface.co","hf.co","hf.space"]},
+    {"id":"poe","name":"Poe","category":"ai","geosite":[],"domains":["poe.com","poecdn.net"]},
+    {"id":"playstation","name":"PlayStation Network","category":"gaming","geosite":["playstation"],"domains":["playstation.com","playstation.net","sonyentertainmentnetwork.com"],"devices":true},
+    {"id":"xbox","name":"Xbox / Game Pass","category":"gaming","geosite":["xbox"],"domains":["xbox.com","xboxlive.com","xboxservices.com"],"devices":true},
+    {"id":"nintendo","name":"Nintendo / Switch","category":"gaming","geosite":["nintendo"],"domains":["nintendo.com","nintendo.net","nintendo.jp"],"devices":true},
+    {"id":"steam","name":"Steam / Steam Deck","category":"gaming","geosite":["steam"],"domains":["steampowered.com","steamcommunity.com","steamcontent.com","steamstatic.com"],"devices":true},
+    {"id":"epic","name":"Epic Games","category":"gaming","geosite":["epicgames"],"domains":["epicgames.com","epicgames.dev","unrealengine.com"],"devices":true}
+  ]
+}

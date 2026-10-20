@@ -1,0 +1,67 @@
+{
+  "updated_at_utc": "2026-10-16T11:51:25.436434+00:00",
+  "sources": {
+    "geodata": {
+      "repository": "Loyalsoldier/v2ray-rules-dat",
+      "branch": "release",
+      "commit": "a2d310e1de9ba35757f1633dda231192d114a306"
+    },
+    "routes": {
+      "repository": "misakaio/chnroutes2",
+      "branch": "master",
+      "commit": "0a74a80e5cb80dc68e7cae13bd7f7ac247204a35"
+    },
+    "stevenblack": {
+      "repository": "StevenBlack/hosts",
+      "branch": "master",
+      "commit": "82f0b5086df733a5591fc3f3b44d4990d0c54e97"
+    },
+    "anti-ad": {
+      "repository": "privacy-protection-tools/anti-AD",
+      "branch": "master",
+      "commit": "003280fc46e5350ef4741e7d731922ea9befdde2"
+    }
+  },
+  "counts": {
+    "geoip.dat_tags": 260,
+    "geosite.dat_tags": 1552,
+    "stevenblack_domains": 73633,
+    "anti_ad_domains": 110164,
+    "advertising_domains": 178927,
+    "china_ipv4_routes": 3879
+  },
+  "files": {
+    "adlists.list": {
+      "sha256": "fc5615b70ea639419ca60bcf013f1bc1d56f4b0ec2a77addbb16ce1b0aecc40b",
+      "bytes": 159
+    },
+    "ads-domains.txt": {
+      "sha256": "3f28a5e784460d55ff3a634db0ac7e98243f04695fd301247f7d84932daed6d1",
+      "bytes": 3560532
+    },
+    "chnrouteSET": {
+      "sha256": "58b0c38b173101efa3050d743207425e95a3b7258b1ff7cc5195169d61f84207",
+      "bytes": 110732
+    },
+    "chnroutes.txt": {
+      "sha256": "158845cfcf636f386531f5f4db8773294fea2a62b12cdb4ff8c6f107018d5d0a",
+      "bytes": 60305
+    },
+    "geoip.dat": {
+      "sha256": "1931cec183daad70aa84c1ff7559d316c94cd3e67ddba4b8fddde125f10068bc",
+      "bytes": 16587393
+    },
+    "geoip.dat.sha256sum": {
+      "sha256": "3e73b8f36d52e85f215242bf583694cdc4085b28b8c61ef46c00fc6b75b36d5d",
+      "bytes": 76
+    },
+    "geosite.dat": {
+      "sha256": "9d951dbf2fcbabd04cd18051a6679eaa1da12566ddf5aa613e53eaee88ae7dc7",
+      "bytes": 11197777
+    },
+    "geosite.dat.sha256sum": {
+      "sha256": "fd9184dfec55b07540416ccc476b63edebcb9aefa7006988cc0614ef72db6a6d",
+      "bytes": 78
+    }
+  }
+}

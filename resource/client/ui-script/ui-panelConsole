@@ -1,0 +1,24 @@
+#!/usr/bin/python3
+"""systemd foreground launcher; private Unix socket, fixed command, no TCP listener."""
+import json
+import os
+from pathlib import Path
+
+root = Path('/opt/de_GWD')
+directory = Path('/run/de-gwd-console')
+allowed = {'update','ui-installCER','ui-installDocker','ui-installJellyfin','ui-installNFS',
+           'ui-installNetdata','ui-installMariaDB','ui-installFileRun','ui-installBitwarden','ui-installWG'}
+os.umask(0o007)
+job = json.loads((directory/'job.json').read_text())
+script = job.get('script')
+if os.geteuid() != 0 or script not in allowed:
+    raise SystemExit('Invalid console job')
+path = root/script
+info = path.lstat()
+if path.is_symlink() or not path.is_file() or info.st_uid != 0 or info.st_mode & 0o022:
+    raise SystemExit('Untrusted console command')
+(directory/'terminal.sock').unlink(missing_ok=True)
+os.execve('/usr/bin/ttyd', ['ttyd','-i',str(directory/'terminal.sock'),'-b','/ttyd',
+          '-O','-o','-m','1','/bin/bash',str(path), *(['--web-update'] if script == 'update' else [])],
+          {'PATH':'/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+           'HOME':'/root','LANG':'C.UTF-8','TERM':'xterm-256color'})

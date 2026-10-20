@@ -1,0 +1,4 @@
+#!/bin/bash
+set -euo pipefail
+/opt/de_GWD/ui-piholeConfig dhcp off
+jq 'del(.address.dhcp)' /opt/de_GWD/0conf | sponge /opt/de_GWD/0conf

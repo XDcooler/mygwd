@@ -1,0 +1,3 @@
+#!/bin/bash
+set -euo pipefail
+exec python3 "${DE_GWD_ROOT:-/opt/de_GWD}/service-routing.py" "$@"

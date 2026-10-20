@@ -1,0 +1,18 @@
+{
+  "repository": "https://github.com/m13253/dns-over-https",
+  "tag": "v2.3.10",
+  "commit": "f13dea391fe17a76eddb879d120abc9ed7b6e014",
+  "go": "go1.27.2",
+  "artifacts": {
+    "amd64": {
+      "file": "resource/doh-server_amd64",
+      "bytes": 8433824,
+      "sha256": "a414ecd24b0f6d338a0b8b698a34036e6511311b75ca293d99635172110e36e4"
+    },
+    "arm64": {
+      "file": "resource/doh-server_arm64",
+      "bytes": 7798944,
+      "sha256": "4b98ad6765283f6e13d136fe6cd5ee046b9c0b2d1c04dbb234b5a746a4a6fcc6"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+name: purge jsdelivr cache
+
+on:
+  release:
+    types: [created]
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: purge jsdelivr cache
+      run: |
+        curl https://purge.jsdelivr.net/gh/XDcooler/mygwd@main/client
+        curl https://purge.jsdelivr.net/gh/XDcooler/mygwd@main/resource/vtrui_amd64.zip
+        curl https://purge.jsdelivr.net/gh/XDcooler/mygwd@main/resource/vtrui_arm64.zip

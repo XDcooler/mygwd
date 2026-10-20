@@ -1,0 +1,43 @@
+#!/bin/bash
+set -euo pipefail
+root=${DE_GWD_ROOT:-/opt/de_GWD}
+state=${1:-}
+[[ $state == on || $state == off ]] || exit 2
+mode=tcp
+[[ $state != on ]] || mode=tcpudp
+[[ -x $root/ui-proxyRules ]] || { echo 'Install ui-proxyRules before changing UDP mode.' >&2; exit 1; }
+exec 8>"$root/.proxy-config.lock"
+flock -x 8
+if [[ ${2:-} == r ]]; then
+    "$root/ui-proxyRules" check "$mode"
+fi
+config=$(mktemp "$root/.udp-config.XXXXXX")
+wrapper=$(mktemp "$root/.udp-wrapper.XXXXXX")
+old_config=$(mktemp "$root/.udp-old-config.XXXXXX")
+old_wrapper=$(mktemp "$root/.udp-old-wrapper.XXXXXX")
+trap 'rm -f "$config" "$wrapper" "$old_config" "$old_wrapper"' EXIT
+cp -p "$root/0conf" "$old_config"
+had_wrapper=false
+if [[ -f $root/iptables-proxy-up ]]; then
+    cp -p "$root/iptables-proxy-up" "$old_wrapper"
+    had_wrapper=true
+fi
+jq --arg state "$state" '.address.udp=$state' "$root/0conf" >"$config"
+chmod --reference="$root/0conf" "$config"
+printf '#!/bin/bash\nexec %q up %s\n' "$root/ui-proxyRules" "$mode" >"$wrapper"
+chmod 755 "$wrapper"
+mv -f "$config" "$root/0conf"
+mv -f "$wrapper" "$root/iptables-proxy-up"
+if [[ ${2:-} == r ]] && ! systemctl restart iptables-proxy; then
+    mv -f "$old_config" "$root/0conf"
+    if [[ $had_wrapper == true ]]; then
+        mv -f "$old_wrapper" "$root/iptables-proxy-up"
+    else
+        rm -f "$root/iptables-proxy-up"
+    fi
+    if [[ $had_wrapper == true ]] && ! systemctl restart iptables-proxy; then
+        echo 'Restoring the previous transparent proxy rules also failed; inspect iptables-proxy logs.' >&2
+    fi
+    echo 'Transparent proxy restart failed; the previous UDP configuration was restored.' >&2
+    exit 1
+fi

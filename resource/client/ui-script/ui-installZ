@@ -1,0 +1,4 @@
+#!/bin/bash
+set -euo pipefail
+systemctl stop updateGWD
+rm -f /opt/de_GWD/update

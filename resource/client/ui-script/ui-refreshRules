@@ -1,0 +1,4 @@
+#!/bin/bash
+set -euo pipefail
+[[ $EUID == 0 && $# == 0 ]] || { echo 'Rule refresh requires root and accepts no arguments.' >&2; exit 1; }
+exec /usr/bin/systemd-run --collect --unit=de-gwd-rules-manual /opt/de_GWD/ui-updateRules

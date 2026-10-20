@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""Manage de_GWD-owned Pi-hole 6 settings through its native configuration CLI."""
+import argparse
+import getpass
+import hashlib
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tomllib
+
+ROOT = Path('/opt/de_GWD')
+
+
+def setting(key, value):
+    if isinstance(value, (list, bool, int)):
+        value = json.dumps(value)
+    subprocess.run(['pihole-FTL', '--config', key, value], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20)
+
+
+def upstream(value):
+    address, _, port = value.partition('#')
+    ipaddress.ip_address(address)
+    if port and (not port.isdigit() or not 1 <= int(port) <= 65535):
+        raise ValueError('Invalid upstream port')
+    return value
+
+
+def managed_hosts(config, current, previous):
+    desired = config.get('dns', {}).get('hosts', {})
+    if not isinstance(desired, dict):
+        raise ValueError('Invalid DNS host map')
+    records = []
+    for host, address in desired.items():
+        if not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?', host):
+            raise ValueError('Invalid DNS hostname')
+        records.append(str(ipaddress.ip_address(address)) + ' ' + host.lower())
+    managed_names = set(desired) | {entry.split()[-1] for entry in previous if entry.split()}
+    retained = [entry for entry in current if not any(name in managed_names for name in entry.split()[1:])]
+    return sorted(set(retained + records)), records
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('operation', choices=('configure', 'upstream', 'port', 'hosts', 'dhcp', 'password'))
+    parser.add_argument('values', nargs='*')
+    parser.add_argument('--role', choices=('client', 'server'), default='client')
+    parser.add_argument('--interface')
+    parser.add_argument('--port', type=int, default=53)
+    parser.add_argument('--no-restart', action='store_true')
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        parser.error('Pi-hole configuration requires root')
+    try:
+        config = json.loads((ROOT/'0conf').read_text()) if (ROOT/'0conf').exists() else {}
+        if args.operation == 'password':
+            password = getpass.getpass('Web management password: ')
+            confirmation = getpass.getpass('Confirm web management password: ')
+            if not password or password != confirmation:
+                raise ValueError('Passwords must match and must not be empty')
+            digest = hashlib.sha256(hashlib.sha256(password.encode()).hexdigest().encode()).hexdigest()
+            # FTL accepts the legacy hash and upgrades it after the next native login.
+            setting('webserver.api.pwhash', digest)
+            config.setdefault('address', {})['PWD'] = digest
+            path = ROOT/'0conf'
+            previous = path.stat()
+            temporary = path.with_name('.password-config.new')
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, 'w') as output:
+                json.dump(config, output, indent=2)
+            os.chown(temporary, previous.st_uid, previous.st_gid)
+            os.chmod(temporary, previous.st_mode & 0o777)
+            os.replace(temporary, path)
+            del password, confirmation
+        elif args.operation == 'configure':
+            if not args.interface or not re.fullmatch(r'[A-Za-z0-9_.:-]+', args.interface):
+                raise ValueError('Invalid network interface')
+            if not 1 <= args.port <= 65535:
+                raise ValueError('Invalid DNS port')
+            servers = ['127.0.0.1#5350'] if args.role == 'client' else ['1.1.1.1', '8.8.8.8', '1.0.0.1', '8.8.4.4']
+            setting('dns.upstreams', servers)
+            setting('dns.interface', args.interface)
+            setting('dns.listeningMode', 'LOCAL')
+            setting('dns.port', args.port)
+            setting('dns.queryLogging', True)
+            setting('misc.etc_dnsmasq_d', True)
+            setting('ntp.ipv4.active', False)
+            setting('ntp.ipv6.active', False)
+            setting('ntp.sync.active', False)
+            setting('webserver.port', '127.0.0.1:8086' if args.role == 'client' else '')
+        elif args.operation == 'upstream':
+            if not args.values:
+                raise ValueError('Supply upstream DNS')
+            setting('dns.upstreams', [upstream(value) for value in args.values])
+        elif args.operation == 'port':
+            if len(args.values) != 1 or not args.values[0].isdigit() or not 1 <= int(args.values[0]) <= 65535:
+                raise ValueError('Invalid DNS port')
+            setting('dns.port', int(args.values[0]))
+        elif args.operation == 'hosts':
+            native = tomllib.loads(Path('/etc/pihole/pihole.toml').read_text())
+            history = ROOT/'pihole-managed-hosts.json'
+            previous = json.loads(history.read_text()) if history.exists() else []
+            records, managed = managed_hosts(config, native.get('dns', {}).get('hosts', []), previous)
+            setting('dns.hosts', records)
+            temporary = history.with_suffix('.json.new')
+            temporary.write_text(json.dumps(managed) + '\n')
+            os.replace(temporary, history)
+        else:
+            if args.values not in (['on'], ['off']):
+                raise ValueError('Choose DHCP on or off')
+            enabled = args.values == ['on']
+            if enabled:
+                address = config.get('address', {})
+                router = ipaddress.IPv4Address(address.get('localIP', ''))
+                first = ipaddress.IPv4Address(address.get('dhcpStart', ''))
+                last = ipaddress.IPv4Address(address.get('dhcpEnd', ''))
+                network = ipaddress.IPv4Network(str(router) + '/24', strict=False)
+                if not (first in network and last in network and first <= last and not first <= router <= last):
+                    raise ValueError('Invalid DHCP range')
+                setting('dhcp.start', str(first))
+                setting('dhcp.end', str(last))
+                setting('dhcp.router', str(router))
+                setting('dhcp.netmask', '255.255.255.0')
+            setting('dhcp.active', enabled)
+        if not args.no_restart:
+            subprocess.run(['systemctl', 'restart', 'pihole-FTL'], check=True, capture_output=True, timeout=90)
+            subprocess.run(['systemctl', 'is-active', '--quiet', 'pihole-FTL'], check=True, capture_output=True)
+        print('Pi-hole 6 configuration applied.')
+    except (OSError, ValueError, subprocess.SubprocessError):
+        print('Pi-hole configuration failed; inspect the supplied interface, DNS or DHCP settings.', file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
