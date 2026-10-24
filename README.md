@@ -10,7 +10,7 @@
 [![Discord](https://img.shields.io/badge/chat-on%20discord-7289da.svg)](https://discord.gg/pgwwzevfNS)
 
 
-本版要求 Debian 13，使用发行版 PHP 8.4 与固定官方 Pi-hole 6。
+本版要求 Debian 13。客户端管理面板使用发行版 PHP 8.4；两端使用固定官方 Pi-hole 6，标准服务端不依赖 PHP。
 
 客户端新增 26 项服务分流，覆盖流媒体、AI、PlayStation、Xbox、Nintendo、Steam 与 Epic；支持默认/直连/指定节点，游戏主机还可按固定 IPv4 配置。GeoIP、GeoSite、中国路由和广告规则每日 04:00 更新，校验或应用失败保留上次验证配置。
 ## Debian 13 服务端（amd64 / arm64）
@@ -33,6 +33,49 @@ bash <(curl -fsSL https://raw.githubusercontent.com/XDcooler/mygwd/main/client)
 ```
 
 完整步骤见 [客户端部署指南（Debian 13 / 威联通 NAS）](docs/client-deployment.md)，包含虚拟交换器、server 节点获取、固定地址、安装参数、HTTPS、分流、验收与下载故障排查。
+
+## 更新已安装的客户端和服务端
+
+在对应 Debian 13 机器的 **root Bash** 中执行，只选择本机角色对应的一组。更新会重建配置并重启相关服务，应先保存配置或虚拟机快照。
+这里的“最新版本”指本仓库 `main` 中的项目脚本及配套资源；第三方代理核心、Pi-hole 等使用项目指定版本，并非自动追踪各组件的最新发布。
+
+**服务端更新：** 重新下载最新脚本，通过语法检查后更新应用。保持 SSH 会话在线，或先进入 screen/tmux 会话。
+
+```bash
+install -d -m0700 /root/mygwd-updates
+curl --fail --location --proto '=https' --proto-redir '=https' \
+  --connect-timeout 15 --max-time 120 \
+  https://raw.githubusercontent.com/XDcooler/mygwd/main/server \
+  -o /root/mygwd-updates/server.download &&
+bash -n /root/mygwd-updates/server.download &&
+mv -f /root/mygwd-updates/server.download /root/mygwd-updates/server &&
+bash /root/mygwd-updates/server --update
+```
+
+**客户端更新：** 启动独立后台任务并显示日志；关闭 SSH 或按 Ctrl+C 退出日志查看后，后台更新继续。
+
+```bash
+install -d -m0700 /root/mygwd-updates
+curl --fail --location --proto '=https' --proto-redir '=https' \
+  --connect-timeout 15 --max-time 120 \
+  https://raw.githubusercontent.com/XDcooler/mygwd/main/client \
+  -o /root/mygwd-updates/client.download &&
+bash -n /root/mygwd-updates/client.download &&
+mv -f /root/mygwd-updates/client.download /root/mygwd-updates/client &&
+bash /root/mygwd-updates/client --web-update
+```
+
+客户端可用 `cat /var/lib/de-gwd-update/status.json` 查看结果，以 `status: succeeded`、`exit_code: 0` 为成功；后台任务启动成功不等于更新完成。
+需要前台执行时，将客户端最后一行改为 `bash /root/mygwd-updates/client --update`，此模式保持 SSH 会话在线。
+
+只刷新 GeoIP、GeoSite、中国路由和广告规则，两端均可运行：
+
+```bash
+bash /opt/de_GWD/ui-updateRules
+```
+
+系统安全补丁、客户端 PHP 补丁及服务端内核更新使用各自流程，不要用反复更新项目代替。
+更新范围、旧版本迁移、固定提交版本、日志、验收与恢复见 [客户端与服务端更新指南](docs/update-guide.md)。
 
 
 

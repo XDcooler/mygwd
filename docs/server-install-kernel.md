@@ -21,6 +21,8 @@ bash /root/mygwd-server --install example.com
 自定义端口写作 `example.com:8443`，会交互读取 Cloudflare API Key 和邮箱，通过 DNS 验证签发证书。
 不带参数运行 `bash /root/mygwd-server` 仍打开菜单，菜单 1 为安装。
 
+应用更新前，应重新执行上面的下载和语法检查，并确认成功；本地旧脚本不会自行升级。完整更新命令、固定提交方式及验收见 [客户端与服务端更新指南](update-guide.md)。
+
 应用更新使用新下载的脚本：
 
 ```bash
