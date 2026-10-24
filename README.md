@@ -10,10 +10,9 @@
 [![Discord](https://img.shields.io/badge/chat-on%20discord-7289da.svg)](https://discord.gg/pgwwzevfNS)
 
 
-本版要求 Debian 13，使用发行版 PHP 8.4 与固定官方 Pi-hole 6。现有 Debian 11 需先升级到 12，再升级到 13；升级前备份网络、应用和证书配置。
+本版要求 Debian 13，使用发行版 PHP 8.4 与固定官方 Pi-hole 6。
 
-客户端新增 26 项服务分流，覆盖流媒体、AI、PlayStation、Xbox、Nintendo、Steam 与 Epic；支持默认/直连/指定节点，游戏主机还可按固定 IPv4 配置。GeoIP、GeoSite、中国路由和广告规则每日 04:00 更新，校验或应用失败保留上次验证配置。详细配置见 [服务分流与 Debian 13](docs/debian13-routing.md)，实际部署结果和未测边界见 [Debian 13 验证记录](docs/debian13-validation.md)。项目版本轮询和自动远程代码覆盖已移除。
-
+客户端新增 26 项服务分流，覆盖流媒体、AI、PlayStation、Xbox、Nintendo、Steam 与 Epic；支持默认/直连/指定节点，游戏主机还可按固定 IPv4 配置。GeoIP、GeoSite、中国路由和广告规则每日 04:00 更新，校验或应用失败保留上次验证配置。
 ## Debian 13 服务端（amd64 / arm64）
 ```
 apt install -y curl
