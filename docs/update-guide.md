@@ -12,7 +12,8 @@
 | 前台应用更新 | `--update`；跳过菜单中的 Debian 整体升级选项 | `--update`；准备依赖，不执行 Debian 整体升级 |
 | 规则刷新 | `bash /opt/de_GWD/ui-updateRules` | 同左 |
 | 内核更新 | 没有 `client --update-kernel` 入口，按 Debian 系统维护流程处理 | `--kernel-check` 查看计划，`--update-kernel` 安装匹配元包 |
-| BBR | 菜单 2/3 启用当前内核 BBR | `--enable-bbr`；不安装内核 |
+| BBR | 菜单 2 启用当前内核 BBR | 菜单 2 或 `--enable-bbr`；不安装内核 |
+| XanMod 内核 | 菜单 3 安装 XanMod LTS、配置 BBR 并重启生效；仅 amd64、标准 GRUB | 菜单 3，同客户端，共用安装器 |
 
 项目更新会重新生成管理配置并重启相关服务，可能短暂中断 DNS、代理和面板访问。已有标准节点和管理设置会被读取使用，但手工修改的 Nginx、DNS、服务文件不能假定会完整保留。操作前保存配置和证书，优先创建 VPS/NAS 虚拟机快照；应用更新失败恢复不等于完整系统回滚。
 
@@ -128,6 +129,8 @@ bash /root/mygwd-updates/server --update-kernel
 ```
 
 保留旧内核，不自动重启；在维护窗口手动重启后核对实际运行内核。BBR 是另一项独立操作：`bash /root/mygwd-updates/server --enable-bbr`。架构、容器及自定义内核限制见 [服务端 Bash 安装与内核更新](server-install-kernel.md)。
+
+两端菜单 3 是另一项独立操作：安装官方 XanMod LTS 兼容软件包，为新内核配置 BBR + fq，核对内核能力、模块、initramfs 与 GRUB 默认启动项后自动请求重启生效。只适用于 Debian 13 amd64 的标准 GRUB 安装；ARM64、容器、Secure Boot 已启用或状态无法确认时拒绝。项目应用更新不会自动执行此菜单操作。流程、备份和验收见 [两端 XanMod 内核](client-xanmod.md)。
 
 ## 更新后验收与失败处理
 

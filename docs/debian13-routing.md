@@ -28,7 +28,7 @@ Pi-hole 6 不再替 PHP 面板提供旧提权配置。除分流状态/保存、�
 
 更新/安装控制台由 systemd `Type=simple`、`KillMode=control-group` 管理，只监听受权限保护的 Unix socket，经 Nginx 的登录会话与一次性连接授权提供访问，不再暴露 TCP 3000。控制台最长运行 15 分钟；相关改动按本轮要求未运行测试，详见 [面板报告修复说明](panel-report-fixes.md)。
 
-可选 Docker 使用官方签名源和 Compose 插件；Jellyfin 使用限定签名源。FileRun 改为 PHP8.4，需管理员通过 `DE_GWD_FILERUN_PACKAGE` 提供当前授权安装 ZIP，ionCube 从官方 HTTPS 下载。可选应用未随网关测试自动安装。内核加速入口启用 Debian 自带 BBR，不再安装旧 5.10 自定义内核。
+可选 Docker 使用官方签名源和 Compose 插件；Jellyfin 使用限定签名源。FileRun 改为 PHP8.4，需管理员通过 `DE_GWD_FILERUN_PACKAGE` 提供当前授权安装 ZIP，ionCube 从官方 HTTPS 下载。可选应用未随网关测试自动安装。客户端菜单 2 启用当前内核 BBR；菜单 3 独立安装官方 XanMod LTS、配置新内核 BBR 并在验证通过后重启生效，仅支持 amd64、标准 GRUB。两项均不再安装旧 5.10 BBRplus 内核；普通应用更新不触发内核更换，详见 [XanMod 说明](client-xanmod.md)。
 
 ## 验证边界
 

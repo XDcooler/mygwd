@@ -4,6 +4,18 @@ mygwd 基于 [jacyl4/de_GWD](https://github.com/jacyl4/de_GWD)，继承
 [XDcooler/de_GWD 的修复版本 667a39b](https://github.com/XDcooler/de_GWD/commit/667a39b3cdd069e4fad23e596540544875d8184d)。
 原有作者、第三方组件及 EPL-2.0 许可证保留。
 
+## 2026-10-25：两端 BBR 与 XanMod 菜单
+
+- 客户端与服务端菜单 2 统一为启用当前 Debian 内核 BBR；清理重复的旧 BBRplus 入口。
+- 两端菜单 3 共用官方 XanMod LTS 安装器，安装内核和头文件，为新内核配置 BBR + fq，核对启动文件与 GRUB 默认项后自动请求重启。
+- 安装器限制 Debian 13 amd64、标准 GRUB 实体机或虚拟机，校验官方软件源密钥完整指纹；拒绝容器、不支持的架构和无法确认的安全启动环境。
+- 保留旧内核和配置备份；下载、包状态、BBR 能力、模块、initramfs 或启动项校验失败时停止重启并尝试恢复配置。已安装包不会自动卸载。
+- 保留服务端 `--kernel-check`、`--update-kernel` 与 `--enable-bbr`。Debian 官方内核命令仍需手动重启，普通应用更新不执行菜单 3。
+
+详细流程和两端验收见 [XanMod 内核、BBR 与重启](client-xanmod.md)。菜单 3 的实际启动及网卡/DKMS 兼容性尚未在生产设备验证；本次发布不在设备上安装内核或重启。
+
+本地回归覆盖两端菜单、共享安装器、更新来源及客户端/服务端更新流程；APT、GRUB、BBR 应用与重启均使用临时文件和命令适配器。原生 Linux 服务配置与 Debian 内核检查继续由既有 GitHub 工作流执行。
+
 ## 2026-10-25：节点切换、DoH 与更新来源修复
 
 - 默认节点切换在真实 Xray 校验通过后同步默认出口与跟随出口，重启并等待监听；普通失败恢复原配置和代理运行状态。页面等待成功后刷新实际选择，不再提前标记成功。

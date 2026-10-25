@@ -1332,12 +1332,6 @@ chmod +x /tmp/comRestart
 
 
 
-installBBRplus(){
-installBBR
-}
-
-
-
 installBBR(){
 requireRoot || return 1
 requireDebian13 || return 1
@@ -1347,6 +1341,21 @@ install -d /etc/sysctl.d
 printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' >/etc/sysctl.d/90-de-gwd-bbr.conf
 sysctl -p /etc/sysctl.d/90-de-gwd-bbr.conf >/dev/null || return 1
 blue "Debian 13 kernel BBR enabled"
+}
+
+installXanMod(){
+local helper result
+requireRoot || return 1
+requireDebian13 || return 1
+[[ $virtVC != container ]] || { red "Container kernels are managed by the host."; return 1; }
+[[ $architecture == amd64 ]] || { red "The official XanMod packages require amd64; ARM64 is not supported."; return 1; }
+command -v python3 >/dev/null || { red "Python 3 is required for XanMod installation."; return 1; }
+helper=$(mktemp /tmp/mygwd-xanmod.XXXXXX) || return 1
+copyOrDownloadAsset scripts/install-xanmod.py "$helper" || { rm -f "$helper"; return 1; }
+python3 "$helper" --install-and-reboot
+result=$?
+rm -f "$helper"
+return "$result"
 }
 
 
@@ -2024,7 +2033,7 @@ blue  $virt
     runServerOperation installGWD
     start_menu
     ;;
-    2)
+    2|3)
     red "Container kernels and BBR must be configured on the host."
     start_menu
     ;;
@@ -2086,8 +2095,8 @@ blue  $virt
     green "=================================================="
     echo
     green  "1. Install de_GWD"
-    green  "2. Update Debian kernel (keep old kernels; reboot manually)"
-    green  "3. Enable Debian kernel BBR"
+    green  "2. Enable Debian kernel BBR"
+    yellow "3. Install XanMod LTS kernel, enable BBR and reboot (amd64)"
     red    "4. Change domain and generate new certificate"
     red    "5. Change Xray path & UUID"
     yellow "0. Update de_GWD"
@@ -2104,11 +2113,12 @@ blue  $virt
     start_menu
     ;;
     2)
-    runKernelUpdate --install
+    installBBR
     start_menu
     ;;
     3)
-    installBBR
+    if installXanMod; then return 0; fi
+    red "XanMod installation or reboot preparation failed. Review the error above."
     start_menu
     ;;
     4)
@@ -2163,8 +2173,10 @@ Usage: sudo bash server [OPTION]
   --update-kernel           Install the matching Debian kernel metapackage.
   --enable-bbr              Enable BBR in the running kernel.
   --help                    Show this help.
-Without an option, open the interactive menu. Kernel installation keeps old
-kernels and requires a later manual reboot; BBR alone does not update kernels.
+Without an option, open the interactive menu. --update-kernel keeps old kernels
+and requires a later manual reboot; --enable-bbr does not update kernels.
+Menu 2 enables BBR in the running kernel. Menu 3 installs XanMod LTS, enables
+BBR and reboots after verification (amd64 and standard GRUB only).
 USAGE
 }
 

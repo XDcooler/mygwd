@@ -21,7 +21,6 @@ PHP_VERSION=8.4
 architecture=$(dpkg --print-architecture)
 [[ -f "/bin/rm" ]] && systemdRM="/bin/rm"
 [[ -f "/usr/bin/rm" ]] && systemdRM="/usr/bin/rm"
-BBRPLUS_Ver="5.10.52"
 NGINX_Ver="1.21.1"
 TTYD_Ver="1.6.3"
 rulesRepository="${DE_GWD_RULES_REPOSITORY:-XDcooler/mygwd}"
@@ -1961,7 +1960,7 @@ waitForClientDNS || return 1
 
 
 
-installBBRplus(){
+installBBR(){
 modprobe tcp_bbr || return 1
 install -d /etc/sysctl.d
 printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' >/etc/sysctl.d/90-de-gwd-bbr.conf
@@ -1969,14 +1968,17 @@ sysctl --system >/dev/null || return 1
 blue "Debian 13 kernel BBR enabled"
 }
 
-
-
-installBBR(){
-modprobe tcp_bbr || return 1
-install -d /etc/sysctl.d
-printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' >/etc/sysctl.d/90-de-gwd-bbr.conf
-sysctl --system >/dev/null || return 1
-blue "Debian 13 kernel BBR enabled"
+installXanMod(){
+local helper result
+[[ $EUID == 0 ]] || { red "XanMod installation requires root."; return 1; }
+requireDebian13 || return 1
+[[ $architecture == amd64 ]] || { red "The official XanMod packages require amd64; ARM64 is not supported."; return 1; }
+helper=$(mktemp /tmp/mygwd-xanmod.XXXXXX) || return 1
+copyOrDownloadAsset scripts/install-xanmod.py "$helper" || { rm -f "$helper"; return 1; }
+python3 "$helper" --install-and-reboot
+result=$?
+rm -f "$helper"
+return "$result"
 }
 
 
@@ -2273,7 +2275,7 @@ blue "Current tcp congestion control: $(sysctl net.ipv4.tcp_congestion_control 2
     echo
     green  "1. Install de_GWD"
     green  "2. Enable Debian kernel BBR"
-    green  "3. Enable Debian kernel BBR"
+    yellow "3. Install XanMod LTS kernel, enable BBR and reboot (amd64)"
     yellow "8. Change Web UI port & Web update port"
     yellow "9. Change de_GWD password"
     yellow "0. Update de_GWD"
@@ -2286,11 +2288,12 @@ blue "Current tcp congestion control: $(sysctl net.ipv4.tcp_congestion_control 2
     start_menu
     ;;
     2)
-    installBBRplus
+    installBBR
     start_menu
     ;;
     3)
-    installBBR
+    if installXanMod; then return 0; fi
+    red "XanMod installation or reboot preparation failed. Review the error above."
     start_menu
     ;;
     8)

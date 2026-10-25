@@ -24,6 +24,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/XDcooler/mygwd/main/server)
 服务端也支持明确的 Bash 命令：`bash server --install example.com`、`bash server --update`、
 `bash server --kernel-check`、`bash server --update-kernel`、`bash server --enable-bbr`。
 内核更新安装匹配的 Debian 内核元包，保留旧内核并提示手动重启；开启 BBR 是独立操作。
+服务端 SSH 菜单 2 为启用当前内核 BBR；菜单 3 安装官方 XanMod LTS、配置 BBR 并在启动校验后自动重启（仅 amd64、标准 GRUB），与客户端共用安装器。Debian 官方内核更新继续使用 `--update-kernel`。
 下载方式、域名证书要求和验证范围见 [服务端 Bash 安装与内核更新](docs/server-install-kernel.md)。
 
 
@@ -35,6 +36,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/XDcooler/mygwd/main/client)
 ```
 
 完整步骤见 [客户端部署指南（Debian 13 / 威联通 NAS）](docs/client-deployment.md)，包含虚拟交换器、server 节点获取、固定地址、安装参数、HTTPS、分流、验收与下载故障排查。
+
+客户端 SSH 菜单 2 启用当前内核 BBR；菜单 3 安装官方 XanMod LTS、配置新内核 BBR，并在核对启动配置后自动重启生效（仅 amd64、标准 GRUB）。此操作独立于应用更新，说明见 [两端 XanMod 内核](docs/client-xanmod.md)。
 
 ## 更新已安装的客户端和服务端
 

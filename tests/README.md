@@ -13,11 +13,16 @@ python3 tests/test_node_switch.py
 node tests/test_node_switch_ui.js
 python3 tests/test_server_installer.py
 python3 tests/test_kernel_update.py
+python3 tests/test_xanmod_install.py
 ```
 
 服务端检查及 Debian 13 内核包安装验证见 [服务端 Bash 安装与内核更新](../docs/server-install-kernel.md)。
 服务端 fixture 将所有写入放在临时目录；包管理、服务命令做适配，原生 Linux 测试使用随包 Xray 和本地 Nginx。
 内核用例需分别以 root 与普通用户运行，分别覆盖安装分支和非 root 拒绝；没有在运行测试的宿主机更新内核。
+
+`test_xanmod_install.py` 在普通用户的私有目录中验证两端菜单 2/3、服务端共享安装器加载与失败退出、XanMod 官方密钥指纹、LTS 安装、
+架构/容器/UEFI 检查、新内核 BBR/fq 能力及模块启动加载、启动文件与默认 GRUB 目标、失败恢复和最后的重启请求。APT、GRUB 和重启均由命令适配器替代，
+不在宿主机安装内核；这不代表已在真实 VM 启动过 XanMod。该用例与来源检查工作流一并运行。
 
 `test_client_updates.py` 在临时目录运行实际更新入口和面板 broker，使用服务命令适配器，
 覆盖逐阶段失败、信号中断、cron 恢复、Xray 就绪和规则启动重试、空参数兼容、配置权限、
