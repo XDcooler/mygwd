@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import stat
 import subprocess
@@ -26,6 +27,9 @@ CONSOLE = Path('/run/de-gwd-console')
 UPDATES = Path('/var/lib/de-gwd-update')
 UPDATE_URL = 'https://raw.githubusercontent.com/XDcooler/mygwd/main/client'
 UPDATE_CMD = 'bash <(curl -fsSL '+UPDATE_URL+')'
+LEGACY_UPDATE_COMMANDS = frozenset(
+    'bash <(curl -fsSL https://raw.githubusercontent.com/'+repository+'/main/client)'
+    for repository in ('XDcooler/de_GWD', 'jacyl4/de_GWD'))
 ENV = {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
        'HOME': '/root', 'LANG': 'C.UTF-8', 'DEBIAN_FRONTEND': 'noninteractive'}
 
@@ -105,6 +109,15 @@ def node_list(value):
     return nodes
 
 
+def normalize_update_metadata(config):
+    """Migrate known saved metadata; never interpret or execute its contents."""
+    update = config.get('update') if isinstance(config, dict) else None
+    if isinstance(update, dict):
+        command = update.get('updateCMD')
+        if isinstance(command, str) and command in LEGACY_UPDATE_COMMANDS:
+            update['updateCMD'] = UPDATE_CMD
+
+
 def secure_tree(value, key=''):
     """Validate restored/legacy configuration before privileged shell helpers see it."""
     if key == 'updateCMD':
@@ -131,6 +144,7 @@ def secure_tree(value, key=''):
 
 def validate_config(config):
     check(isinstance(config, dict))
+    normalize_update_metadata(config)
     secure_tree(config)
     node_list(config.get('v2node'))
     settings = config.get('address', {})
@@ -198,7 +212,7 @@ def helper(name, *args):
           'Management helper must be a root-owned, non-writable regular file')
     # Preserve legacy optional lookups/fallbacks; capture the script's actual
     # exit status without injecting errexit into previously non-errexit scripts.
-    return run(['/bin/bash', str(path), *map(str, args)])
+    return run(['/bin/bash', str(path), *map(str, args)], timeout=240 if name == 'changeNode' else 120)
 
 
 def node_index(params, name, config, clients=False, minimum=0):
@@ -307,6 +321,9 @@ def backup(kind):
 
 
 def perform(action, p, config):
+    # Reading a migrated panel shows the current fixed update URL. Changes are
+    # persisted only by an action that saves config; browser commands stay strict.
+    normalize_update_metadata(config)
     if action == 'updateStatus':
         return update_status()
     if action == 'snapshot':
@@ -435,7 +452,17 @@ def perform(action, p, config):
         put('address.alias', value)
         commands = [('markThis',)]
     elif action == 'saveNode':
-        put('v2node', node_list(p.get('nodeList', [])))
+        replacement = node_list(p.get('nodeList', []))
+        if 'serviceRouting' in config:
+            routing = runpy.run_path(str(ROOT/'service-routing.py'))
+            try:
+                policies = routing['replacement_policies'](
+                    config, json.loads((ROOT/'vtrui/config.json').read_text()),
+                    json.loads((ROOT/'service-catalog.json').read_text()), replacement)
+            except (ValueError, KeyError, StopIteration):
+                raise Rejected('节点仍被服务分流引用。请先调整相关分流，再修改或删除节点。') from None
+            put('serviceRouting.policies', policies)
+        put('v2node', replacement)
         commands = [('saveNode',)]
     elif action == 'changeNodeSS':
         put('v2nodeDIV.ss', {'ssAddress':host(p.get('ssAddress')), 'ssPort':port(p.get('ssPort')),

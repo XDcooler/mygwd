@@ -29,6 +29,12 @@ NGINX_Ver="1.21.1"
 
 rulesRepository="${DE_GWD_RULES_REPOSITORY:-XDcooler/mygwd}"
 rulesBranch="${DE_GWD_RULES_BRANCH:-main}"
+# Migrate the old project source before constructing any download URL.
+case "$(printf '%s' "$rulesRepository" | tr '[:upper:]' '[:lower:]')" in
+    xdcooler/de_gwd|jacyl4/de_gwd)
+        rulesRepository=XDcooler/mygwd
+        yellow "Legacy project source replaced with XDcooler/mygwd; verify any pinned branch belongs to mygwd.";;
+esac
 sourceDirectory=$(cd -- "$(dirname -- "$serverSourcePath")" && pwd)
 
 requireRoot(){

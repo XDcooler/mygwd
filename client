@@ -24,10 +24,14 @@ architecture=$(dpkg --print-architecture)
 BBRPLUS_Ver="5.10.52"
 NGINX_Ver="1.21.1"
 TTYD_Ver="1.6.3"
-branch="main"
-
 rulesRepository="${DE_GWD_RULES_REPOSITORY:-XDcooler/mygwd}"
 rulesBranch="${DE_GWD_RULES_BRANCH:-main}"
+# Migrate the old project source before constructing any download URL.
+case "$(printf '%s' "$rulesRepository" | tr '[:upper:]' '[:lower:]')" in
+    xdcooler/de_gwd|jacyl4/de_gwd)
+        rulesRepository=XDcooler/mygwd
+        yellow "Legacy project source replaced with XDcooler/mygwd; verify any pinned branch belongs to mygwd.";;
+esac
 sourceDirectory=$(cd -- "$(dirname -- "$clientSourcePath")" && pwd)
 
 installRulesUpdater(){
@@ -99,7 +103,35 @@ done
 
 
 
-installCMD="bash <(curl -fsSL https://raw.githubusercontent.com/$rulesRepository/$rulesBranch/client)"
+# Panel updates always use the official entry, independently of a CLI asset pin.
+installCMD='bash <(curl -fsSL https://raw.githubusercontent.com/XDcooler/mygwd/main/client)'
+
+migrateUpdateSource(){
+# Reuse the installed broker's atomic writer and lock, without running an update.
+python3 - /opt/de_GWD/ui-panel <<'PY_UPDATE_SOURCE'
+import fcntl
+import json
+import runpy
+import os
+import sys
+
+os.umask(0o077)
+broker = runpy.run_path(sys.argv[1])
+private = broker['PRIVATE']
+private.mkdir(mode=0o700, parents=True, exist_ok=True)
+with (private/'management.lock').open('a') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    config = json.loads(broker['CONFIG'].read_text())
+    if not isinstance(config, dict):
+        raise ValueError('Invalid client configuration')
+    update = config.get('update', {})
+    if not isinstance(update, dict):
+        raise ValueError('Invalid update metadata')
+    if update.get('updateCMD') != broker['UPDATE_CMD']:
+        broker['set_value'](config, ['update', 'updateCMD'], broker['UPDATE_CMD'])
+        broker['save'](config)
+PY_UPDATE_SOURCE
+}
 
 
 
@@ -1698,6 +1730,7 @@ install -d -m0700 -o www-data -g www-data /var/lib/de-gwd-auth
 rm -f /var/www/html/restore/de_GWD_bak /var/www/html/restore/Bitwarden_bak.zip
 # Web root is read-only to PHP; uploads are passed directly to the broker.
 chmod +x /opt/de_GWD/ui-panel /opt/de_GWD/ui-panelConsole
+migrateUpdateSource || return 1
 
 refreshPanelPHP || return 1
 nginx -t || return 1

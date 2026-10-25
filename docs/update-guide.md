@@ -76,6 +76,12 @@ bash /root/mygwd-updates/client --update
 
 Web 面板的“准备官方更新 → 打开更新控制台”使用同样的后台流程。旧 de_GWD 面板可能仍指向原仓库；要切换到 mygwd，应先使用上面的 mygwd 下载地址更新一次，再核对面板更新来源。
 
+新版管理入口识别 `XDcooler/de_GWD` 与 `jacyl4/de_GWD` 的已知旧版 `main/client` 标准更新命令，将保存在配置中的旧字段规范为 mygwd。读取面板时显示新入口，正常保存设置时持久化，避免旧元数据误阻断 DoH 等无关设置。此迁移不执行更新命令；浏览器提交的自定义命令和未知地址仍被拒绝。
+
+完整客户端安装或更新在部署管理脚本后，会在同一管理锁下将 `0conf` 的更新命令写为官方 mygwd 入口，无需等待下一次保存 DoH。此步骤只改更新元数据，不执行旧命令，不改节点、DNS、密码或原有备份。命令行指定资源仓库或固定提交时，面板后续更新仍使用官方 `XDcooler/mygwd/main/client`。
+
+两端安装器还会将遗留的 `DE_GWD_RULES_REPOSITORY=XDcooler/de_GWD` 或 `jacyl4/de_GWD` 自动改用 `XDcooler/mygwd`，忽略大小写并显示迁移提示。资源分支或提交参数继续保留；如果原来固定的是旧库专属提交，需改为 mygwd 中存在的提交，否则下载会失败。其余显式指定的 fork 不变。`DE_GWD_*` 环境变量、`/opt/de_GWD` 路径、服务名和旧备份文件名仍是兼容接口；来源署名和用于识别旧配置的字符串也继续保留。
+
 ## 固定提交版本与完整源码更新
 
 默认远程脚本和资源从 `main` 获取。若更新期间分支被继续推进，多次请求可能处于不同提交；需要可复现部署时，应在 GitHub [提交记录](https://github.com/XDcooler/mygwd/commits/main/) 中选定完整的 40 位提交 SHA，将脚本下载 URL 中的 `main` 和资源分支同时固定为该 SHA。

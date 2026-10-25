@@ -11,9 +11,11 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 
@@ -106,6 +108,62 @@ def make_outbound(node, tag):
         {'address': host, 'port': port, 'users': [user]}]}, 'streamSettings': stream}
 
 
+def outbound_identity(outbound):
+    """Compare connection parameters, rather than labels or legacy node hashes."""
+    if outbound.get('protocol') != 'vless':
+        return None
+    try:
+        target = outbound['settings']['vnext'][0]
+        stream = outbound['streamSettings']
+        host = str(target['address']).lower()
+        security = stream.get('security', 'none')
+        tls = stream.get('tlsSettings') or stream.get('xtlsSettings') or {}
+        ws = stream.get('wsSettings', {})
+        ws_host = str(ws.get('headers', {}).get('Host') or host).lower() if stream.get('network') == 'ws' else ''
+        return (host, int(target['port']), str(uuid.UUID(target['users'][0]['id'])),
+                stream.get('network', 'tcp'), security,
+                str(tls.get('serverName') or host).lower(),
+                ws.get('path', ''), ws_host)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
+def recover_node_references(config, core, policies):
+    """Recover a stale ID only when its compiled outbound identifies one node."""
+    if not isinstance(policies, dict):
+        return policies  # normalize() reports malformed policy maps.
+    result = copy.deepcopy(policies)
+    available = nodes(config)
+    compiled = {out.get('tag'): out for out in core.get('outbounds', [])}
+    for policy in result.values():
+        if not isinstance(policy, dict) or policy.get('mode') != 'node' or policy.get('node') in available:
+            continue
+        identity = outbound_identity(compiled.get('svc-' + str(policy.get('node')), {}))
+        if identity is None:
+            continue
+        matches = [key for key, node in available.items()
+                   if outbound_identity(make_outbound(node, 'candidate')) == identity]
+        if len(matches) == 1:
+            policy['node'] = matches[0]
+    return result
+
+
+def replacement_policies(config, core, catalog, replacement):
+    candidate = copy.deepcopy(config)
+    candidate['v2node'] = replacement
+    return normalize(recover_node_references(candidate, core, saved_policies(config)), catalog, candidate)
+
+
+def selected_node(config, core):
+    default = next((out for out in core.get('outbounds', []) if out.get('tag') == 'default'), {})
+    identity = outbound_identity(default)
+    if identity is not None:
+        for index, node in enumerate(config.get('v2node', [])):
+            if outbound_identity(make_outbound(node, 'candidate')) == identity:
+                return index
+    return None
+
+
 def normalize(policies, catalog, config):
     if not isinstance(policies, dict) or set(policies) - {entry['id'] for entry in catalog['services']}:
         raise ValueError('Unknown service policy')
@@ -157,7 +215,7 @@ def saved_policies(config):
 
 
 def compile_routes(config, core, catalog, policies, site, geo):
-    policies = normalize(policies, catalog, config)
+    policies = normalize(recover_node_references(config, core, policies), catalog, config)
     result = copy.deepcopy(core)
     result['outbounds'] = [out for out in result['outbounds'] if not out.get('tag', '').startswith('svc-') and out.get('tag') != 'netflix']
     routing = result.setdefault('routing', {})
@@ -247,9 +305,11 @@ def atomic_write(path, data, mode=0o644):
 def status(root, catalog, config):
     manifest = root/'rules/manifest.json'
     progress = root/'rule-update-status.json'
+    core_file = root/'vtrui/config.json'
+    core = json.loads(core_file.read_text()) if core_file.exists() else {}
     return {'categories': catalog['categories'], 'services': catalog['services'],
             'nodes': [{'id': key, 'name': str(node.get('name') or node['domain'])} for key, node in nodes(config).items()],
-            'policies': saved_policies(config),
+            'policies': recover_node_references(config, core, saved_policies(config)),
             'lastApplied': config.get('serviceRouting', {}).get('lastApplied'),
             'udpEnabled': config.get('address', {}).get('udp') == 'on',
             'rules': json.loads(manifest.read_text()) if manifest.exists() else {},
@@ -257,11 +317,8 @@ def status(root, catalog, config):
             'schedule': '每天 04:00 自动更新 GeoIP / GeoSite / 中国路由及广告规则'}
 
 
-def apply(root, catalog, config, policies, restart=True):
+def validate_core(root, core):
     core_file = root/'vtrui/config.json'
-    site, geo = geodata(root/'vtrui/geosite.dat'), geodata(root/'vtrui/geoip.dat')
-    core, policies, devices, networks, domains = compile_routes(config, json.loads(core_file.read_text()), catalog, policies, site, geo)
-    dns_file = Path('/etc/dnsmasq.d/90-de-gwd-services.conf') if root == Path('/opt/de_GWD') else root/'services-dnsmasq.conf'
     fd, candidate = tempfile.mkstemp(prefix='.services-', suffix='.json', dir=core_file.parent)
     try:
         with os.fdopen(fd, 'w') as output:
@@ -273,6 +330,106 @@ def apply(root, catalog, config, policies, restart=True):
             raise ValueError('Core rejected the routing configuration; previous configuration preserved')
     finally:
         Path(candidate).unlink(missing_ok=True)
+
+
+def proxy_ready(config):
+    transports = ['tcp'] + (['udp'] if config.get('address', {}).get('udp') == 'on' else [])
+    for _ in range(50):
+        if subprocess.run(['systemctl', 'is-active', '--quiet', 'vtrui'], capture_output=True,
+                          timeout=5).returncode == 0:
+            if all(subprocess.run(['ss', '-H', '-lnt' if protocol == 'tcp' else '-lnu',
+                                   '( sport = :9896 )'], capture_output=True, timeout=5).stdout.strip()
+                   for protocol in transports):
+                return True
+        time.sleep(0.1)
+    return False
+
+
+class SwitchFailure(ValueError):
+    def __init__(self, recovered):
+        self.recovered = recovered
+        super().__init__('Node switch failed')
+
+
+def switch_node(root, config, index):
+    if not isinstance(index, int) or not 0 <= index < len(config.get('v2node', [])):
+        raise ValueError('Invalid node index')
+    core_file, config_file = root/'vtrui/config.json', root/'0conf'
+    core = json.loads(core_file.read_text())
+    if sum(out.get('tag') == 'default' for out in core.get('outbounds', [])) != 1:
+        raise ValueError('Missing or duplicate default outbound')
+    node = config['v2node'][index]
+    default = make_outbound(node, 'default')
+    candidate = copy.deepcopy(core)
+    for position, outbound in enumerate(candidate['outbounds']):
+        if outbound.get('tag') in ('default', 'svc-default'):
+            candidate['outbounds'][position] = dict(copy.deepcopy(default), tag=outbound['tag'])
+    # Default selection must not recompile unrelated pinned service policies.
+    updated = copy.deepcopy(config)
+    target = default['settings']['vnext'][0]
+    updated.setdefault('update', {})['v2node'] = {
+        'domain': target['address'], 'port': str(target['port']),
+        'tls': node.get('tls') or target['address'],
+        'uuid': target['users'][0]['id'], 'path': node.get('path', '')}
+    repaired = 0
+    if 'serviceRouting' in config:
+        original = saved_policies(config)
+        recovered = recover_node_references(config, core, original)
+        replacements = {}
+        for service, policy in recovered.items():
+            if isinstance(policy, dict) and policy.get('mode') == 'node' and policy.get('node') != original[service].get('node'):
+                replacements['svc-' + original[service]['node']] = 'svc-' + policy['node']
+                repaired += 1
+        # These references were matched by endpoint, UUID, SNI and transport.
+        # Rename only their tags; never replace a pin merely by matching its host.
+        for old_tag, new_tag in replacements.items():
+            old = next(out for out in candidate['outbounds'] if out.get('tag') == old_tag)
+            existing = next((out for out in candidate['outbounds'] if out.get('tag') == new_tag), None)
+            if existing is not None:
+                if outbound_identity(existing) != outbound_identity(old):
+                    raise ValueError('Conflicting service node identity')
+                candidate['outbounds'].remove(old)
+            else:
+                old['tag'] = new_tag
+            for rule in candidate.get('routing', {}).get('rules', []):
+                if rule.get('outboundTag') == old_tag:
+                    rule['outboundTag'] = new_tag
+        if repaired:
+            updated['serviceRouting']['policies'] = recovered
+    validate_core(root, candidate)
+    originals = {path: path.read_bytes() for path in (core_file, config_file)}
+    was_active = subprocess.run(['systemctl', 'is-active', '--quiet', 'vtrui'],
+                                capture_output=True, timeout=5).returncode == 0
+    try:
+        atomic_write(core_file, json.dumps(candidate, indent=2).encode() + b'\n')
+        atomic_write(config_file, json.dumps(updated, indent=2).encode() + b'\n')
+        subprocess.run(['systemctl', 'restart', 'vtrui'], check=True, capture_output=True, timeout=90)
+        if not proxy_ready(updated):
+            raise ValueError('Proxy listener did not become ready')
+    except BaseException:
+        recovered = True
+        for path, data in originals.items():
+            try:
+                atomic_write(path, data)
+            except OSError:
+                recovered = False
+        try:
+            subprocess.run(['systemctl', 'restart' if was_active else 'stop', 'vtrui'],
+                           check=True, capture_output=True, timeout=90)
+            if was_active and not proxy_ready(config):
+                recovered = False
+        except (OSError, ValueError, subprocess.SubprocessError):
+            recovered = False
+        raise SwitchFailure(recovered) from None
+    return {'saved': True, 'nodeIndex': index, 'recoveredPolicies': repaired}
+
+
+def apply(root, catalog, config, policies, restart=True):
+    core_file = root/'vtrui/config.json'
+    site, geo = geodata(root/'vtrui/geosite.dat'), geodata(root/'vtrui/geoip.dat')
+    core, policies, devices, networks, domains = compile_routes(config, json.loads(core_file.read_text()), catalog, policies, site, geo)
+    dns_file = Path('/etc/dnsmasq.d/90-de-gwd-services.conf') if root == Path('/opt/de_GWD') else root/'services-dnsmasq.conf'
+    validate_core(root, core)
     updated = copy.deepcopy(config)
     updated['serviceRouting'] = {'schema': 1, 'policies': policies, 'lastApplied': datetime.now(timezone.utc).isoformat()}
     updated.setdefault('v2nodeDIV', {}).setdefault('nodeNF', {})['display'] = 'off'
@@ -323,13 +480,24 @@ def deployment_lock(root):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=('status', 'apply', 'reapply'))
+    parser.add_argument('operation', choices=('status', 'apply', 'reapply', 'switch-node', 'selected-node'))
     parser.add_argument('--root', default=os.environ.get('DE_GWD_ROOT', '/opt/de_GWD'))
     parser.add_argument('--no-restart', action='store_true')
+    parser.add_argument('--index', type=int)
     args = parser.parse_args()
+    if args.operation == 'switch-node':
+        def interrupted(signum, frame):
+            raise InterruptedError('Node switch interrupted')
+        signal.signal(signal.SIGTERM, interrupted)
+        signal.signal(signal.SIGHUP, interrupted)
     root = Path(args.root)
     try:
-        catalog = json.loads(root.joinpath('service-catalog.json').read_text())
+        if args.operation == 'selected-node':
+            index = selected_node(json.loads(root.joinpath('0conf').read_text()),
+                                  json.loads(root.joinpath('vtrui/config.json').read_text()))
+            print('' if index is None else index)
+            return 0
+        catalog = json.loads(root.joinpath('service-catalog.json').read_text()) if args.operation != 'switch-node' else None
         if args.operation == 'status':
             result = status(root, catalog, json.loads(root.joinpath('0conf').read_text()))
         else:
@@ -339,18 +507,28 @@ def main():
             with lock_path.open('w') as lock, deployment_lock(root):
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 config = json.loads(root.joinpath('0conf').read_text())
-                if args.operation == 'apply':
+                if args.operation == 'switch-node':
+                    result = switch_node(root, config, args.index)
+                elif args.operation == 'apply':
                     payload = sys.stdin.buffer.read(98305)
                     if len(payload) > 98304:
                         raise ValueError('Request too large')
                     policies = json.loads(payload)
                 else:
                     policies = saved_policies(config)
-                result = apply(root, catalog, config, policies, restart=not args.no_restart)
+                if args.operation != 'switch-node':
+                    result = apply(root, catalog, config, policies, restart=not args.no_restart)
         print(json.dumps(result, ensure_ascii=False))
+    except SwitchFailure as error:
+        message = ('节点切换失败，已恢复原配置和代理服务。' if error.recovered else
+                   '节点切换失败，恢复未完成，请检查代理服务和配置。')
+        print(json.dumps({'error': message}, ensure_ascii=False))
+        return 1
     except (OSError, ValueError, KeyError, StopIteration, subprocess.SubprocessError):
         # Deliberately generic: do not log submitted UUIDs, paths or credentials.
-        print(json.dumps({'error': '分流配置未应用，请检查节点、主机 IP、规则库和服务状态。原配置已保留。'}, ensure_ascii=False))
+        message = ('节点切换未应用，请检查节点参数、配置和服务状态。' if args.operation == 'switch-node' else
+                   '分流配置未应用，请检查节点、主机 IP、规则库和服务状态。原配置已保留。')
+        print(json.dumps({'error': message}, ensure_ascii=False))
         return 1
     return 0
 

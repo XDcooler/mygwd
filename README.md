@@ -4,6 +4,8 @@
 
 安装和面板更新默认使用本仓库 `XDcooler/mygwd`。为兼容已有配置，系统内的 `/opt/de_GWD` 路径与服务名称保持不变。修复内容和实机验证见 [mygwd 发布说明](docs/mygwd-release.md)，原有 [EPL-2.0 许可证](LICENSE.md) 保留。
 
+遗留的旧仓库资源环境变量会迁移至 mygwd；完整客户端更新也会同步修正配置中的更新入口。迁移范围与固定版本用法见 [更新指南](docs/update-guide.md)。
+
 ## 仅供学习与研究
 
 [![Telegram](https://cdn.jsdelivr.net/gh/Patrolavia/telegram-badge@8fe3382b3fd3a1c533ba270e608035a27e430c2e/chat.svg)](https://t.me/de_GWD)

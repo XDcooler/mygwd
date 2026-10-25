@@ -1,4 +1,5 @@
 #!/bin/bash
+smartDNSBefore=$(sha256sum /etc/smartdns/smartdns.conf | awk '{print $1}')
 unset shttps
 shttps[0]=$(grep 'server-https ' /etc/smartdns/smartdns.conf | awk NR==1)
 shttps[1]=$(grep 'server-https ' /etc/smartdns/smartdns.conf | awk NR==2)
@@ -142,9 +143,12 @@ fi
 
 
 
-if [[ $xDNScIP != $xDNScIPO ]] || [[ $doh1IP != $doh1IP0 ]] || [[ $doh2IP != $doh2IP0 ]]; then
-systemctl restart smartdns >/dev/null
+smartDNSAfter=$(sha256sum /etc/smartdns/smartdns.conf | awk '{print $1}')
+# A changed SNI or port can resolve to the same IP. Load changed bytes too.
+if [[ $smartDNSBefore != $smartDNSAfter ]] || ! systemctl is-active --quiet smartdns; then
+systemctl restart smartdns >/dev/null || exit 1
 fi
+systemctl is-active --quiet smartdns || exit 1
 
 echo $doh1IP $doh2IP $xDNScIP | xargs -n 1 | sort | uniq >/opt/de_GWD/IPxDNS
 sed -i '/^\s*$/d' /opt/de_GWD/IPxDNS

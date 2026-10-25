@@ -27,6 +27,7 @@
   <meta name="gwd-csrf" content="<?php echo htmlspecialchars($_SESSION['service_csrf'], ENT_QUOTES, 'UTF-8'); ?>">
   <script src="vendor/jquery/jquery.min.js"></script>
   <script src="js/panel.js"></script>
+  <script src="js/node-switch.js"></script>
   <script src="vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
 
   <!-- Core plugin JavaScript-->
@@ -440,7 +441,7 @@ print <<<EOT
                     <td class="align-middle"><span id="nodeshow${i}">${name}</span></td>
                     <td class="align-middle"><span id="ping${i}" class='text-success'></span></td>
                     <td class="align-middle"><span id="speed${i}" class='text-success'><a href="javascript:void(0)" class="text-success" onclick="buttonSpeed(this)"><i class="far fa-play-circle fa-lg"></i></a></span></td>
-                    <td class="align-middle"><button id="switch${i}" type="button" class="btn $checkStatus btn-sm" onclick="buttonSwitch(this)">切换</button></td>
+                    <td class="align-middle"><button id="switch${i}" data-node-index="${i}" type="button" class="btn $checkStatus btn-sm" onclick="buttonSwitch(this)">切换</button></td>
                   </tr>
 EOT;
 }
@@ -740,15 +741,6 @@ var SPEEDindex = SPEEDobj.index($(buttonSpeed).parent().parent().parent()[0])
 $('#speed'+SPEEDindex).empty()
 $('#speed'+SPEEDindex).attr('class', 'cloud')
 $.get("./act/speedT.php", {speedT:SPEEDindex}, function(data){$('#speed'+SPEEDindex).attr('class', 'text-success'); $('#speed'+SPEEDindex).text(data)})
-}
-
-function buttonSwitch(buttonSwitch){
-var SWITCHobj = $(buttonSwitch).parent().parent().parent().find('tr')
-var SWITCHindex = SWITCHobj.index($(buttonSwitch).parent().parent()[0])
-$("#nodeTable td:nth-child(6) button").attr('class', "btn btn-outline-secondary btn-sm")
-$("#buttonSSdetail").attr('class','btn btn-outline-secondary btn-sm mt-1')
-$('#switch'+SWITCHindex).attr('class', 'btn btn-success btn-sm');
-$.post("./act/changeNode.php", {nodenum:SWITCHindex}, function(){})
 }
 
 function buttonNodeDT(buttonNodeDT){

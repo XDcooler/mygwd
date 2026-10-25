@@ -7,6 +7,10 @@ python3 scripts/build-client-archive.py
 python3 tests/test_regressions.py
 python3 tests/test_rule_updates.py
 python3 tests/test_client_updates.py
+python3 tests/test_update_sources.py
+python3 tests/test_dns_settings.py
+python3 tests/test_node_switch.py
+node tests/test_node_switch_ui.js
 python3 tests/test_server_installer.py
 python3 tests/test_kernel_update.py
 ```
@@ -20,6 +24,17 @@ python3 tests/test_kernel_update.py
 更新互斥及状态输出；还检查 PHP 部署刷新、失败后的 DNS 端口/系统解析器恢复，
 以及 UDP/TCP DNS 真实应答判定。它不执行真实安装；真实 systemd 与完整更新仍需 Debian VM 验证。
 更新的后台执行和恢复方式见 [客户端更新恢复](../docs/client-update-recovery.md)。
+
+`test_update_sources.py` 检查客户端与服务端的默认下载源、旧仓库环境变量迁移、固定提交与面板更新入口的独立性、
+完整客户端更新时的配置迁移，并逐项核对安装 ZIP 与源码。全部下载和配置操作都使用临时文件与命令适配器，
+不连接 GitHub、不重启宿主服务。对应 CI 为 `update-sources.yml`，发布后提交或 PR 改动相关文件时自动运行。
+
+`test_node_switch.py` 使用私有目录和服务命令适配器，覆盖候选配置校验、默认出口及跟随出口同步、显式分流保留、
+重启/监听/写入/中断失败恢复、旧分流标识恢复和被引用节点删除拒绝，不重启测试宿主机服务。
+`test_node_switch_ui.js` 使用 Node.js 内置模块验证切换等待、失败、成功及非法索引，确保失败请求不会提前标记为已切换。
+切换机制与验收方式见 [节点切换说明](../docs/node-switching.md)。
+
+`test_dns_settings.py` 检查旧仓库更新元数据迁移、DoH 保存、备份恢复及自定义命令拒绝；Linux 上还以临时目录和命令适配器验证同 IP 更改 DoH 端口/SNI 后 SmartDNS 重载、重复应用及重启失败传播，不修改宿主机 DNS。
 
 功能与安装器回归应在隔离 Debian 13 ARM64 或 amd64 VM 中执行，使用系统 PHP 8.4：
 

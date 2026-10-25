@@ -1,0 +1,43 @@
+name: Project update source checks
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - client
+      - server
+      - scripts/**
+      - resource/client/**
+      - tests/test_update_sources.py
+      - .github/workflows/update-sources.yml
+  pull_request:
+    paths:
+      - client
+      - server
+      - scripts/**
+      - resource/client/**
+      - tests/test_update_sources.py
+      - .github/workflows/update-sources.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-and-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch the exact tested commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q
+          git fetch --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout -q --detach FETCH_HEAD
+      - name: Check source migration and the distributed client archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n client server
+          python3 -B tests/test_update_sources.py
