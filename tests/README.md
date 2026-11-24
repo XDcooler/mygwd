@@ -18,6 +18,8 @@ python3 tests/test_xanmod_install.py
 
 服务端检查及 Debian 13 内核包安装验证见 [服务端 Bash 安装与内核更新](../docs/server-install-kernel.md)。
 服务端 fixture 将所有写入放在临时目录；包管理、服务命令做适配，原生 Linux 测试使用随包 Xray 和本地 Nginx。
+服务端节点回归覆盖新旧 HTTPS 监听写法、自定义端口、双栈去重、歧义/缺失端口拒绝、URL 参数编码，
+以及更新和修改 UUID/路径时的端口保留。二维码用命令适配器核对实际传入的完整 URL；手机扫码导入仍需设备验收。
 内核用例需分别以 root 与普通用户运行，分别覆盖安装分支和非 root 拒绝；没有在运行测试的宿主机更新内核。
 
 `test_xanmod_install.py` 在普通用户的私有目录中验证两端菜单 2/3、服务端共享安装器加载与失败退出、XanMod 官方密钥指纹、LTS 安装、

@@ -36,6 +36,22 @@ bash /root/mygwd-server --update
 
 应用安装准备自身依赖；系统整体升级和内核升级使用各自流程。
 
+## 节点链接与二维码
+
+服务端菜单 **11. Print Xray node information** 显示完整的 `vless://` 链接与同内容二维码。
+链接始终写明 HTTPS 入口端口（包括 `:443`），WebSocket 路径等参数按 URL 规则编码。
+页面显示的 Path 为配置中的实际路径，不额外附加 `?ed=2048`。
+
+显示节点、应用更新和修改 UUID/路径共用端口读取逻辑：从 `/etc/nginx/conf.d/default.conf`
+的 HTTPS `server` 块读取明确域名与 `listen` 端口，不依赖 `http2`、`fastopen`、`reuseport` 的顺序或是否存在。
+支持单独的 `http2 on;`、`IP:端口`、`[IPv6]:端口`，IPv4/IPv6 相同端口会去重。
+该读取逻辑针对项目生成的配置，不展开其他文件中的 `include`；入口域名与监听端口需直接声明在 `default.conf` 中。
+
+未找到入口、多个 HTTPS `server` 块或多个不同 HTTPS 端口时停止并报错，不猜测端口或默认替换成 443。
+更新及修改 UUID/路径在改写配置前完成此检查；节点配置缺失、UUID 或路径无效时不生成二维码。
+旧脚本生成链接缺少端口时，重新下载本仓库的 `server`，通过 `bash -n` 检查后打开菜单 11 即可重新生成；
+仅重新生成二维码不需要执行 `--update`、重装服务或更改现有 UUID。
+
 ## 内核更新和 BBR
 
 服务端交互菜单与客户端对齐：
@@ -85,6 +101,8 @@ Debian `--update-kernel` 安装保留旧内核，不执行 purge/autoremove，�
 ## 验证范围
 
 `tests/test_server_installer.py` 对安装各阶段做故障注入，覆盖非法输入、EOF、核心 ZIP 验证及更新失败恢复 cron。
+节点用例覆盖 443/自定义端口、新旧 HTTP/2 写法、选项顺序、带地址监听、双栈去重、端口歧义及无效配置拒绝，
+并检查复制链接与二维码参数一致、URL 解码后路径保持完整、更新及修改 UUID/路径保留现有端口。
 Linux 上还使用真实随包 Xray 校验生成配置，启动真实 Nginx，以临时测试证书验证 HTTPS 200 和管理路径 404。
 `tests/test_kernel_update.py` 验证四种元包选择、只读计划、容器/权限拒绝、APT 失败、缺失启动文件、旧内核保留及状态记录。
 `tests/test_xanmod_install.py` 通过临时文件与命令适配器验证两端菜单 2/3、服务端共享安装器加载、架构/容器拒绝、BBR、GRUB 与失败恢复，测试中不安装或重启内核。

@@ -4,6 +4,17 @@ mygwd 基于 [jacyl4/de_GWD](https://github.com/jacyl4/de_GWD)，继承
 [XDcooler/de_GWD 的修复版本 667a39b](https://github.com/XDcooler/de_GWD/commit/667a39b3cdd069e4fad23e596540544875d8184d)。
 原有作者、第三方组件及 EPL-2.0 许可证保留。
 
+## 2026-11-24：服务端二维码端口与链接修复
+
+- 修复端口读取依赖固定 `ssl http2 fastopen=128 reuseport` 字符串的问题，兼容新版 HTTP/2 写法、选项变化、带地址监听及同端口双栈。
+- 二维码链接显式包含端口，对 WebSocket 路径等参数编码，生成前验证 UUID 和路径；输出同内容完整链接，便于复制导入。
+- 更新及修改 UUID/路径复用同一入口解析，缺少或无法唯一确定端口时在改写配置前停止，避免将自定义端口误改为 443。
+- 节点信息显示真实 WebSocket 路径，二维码编码失败正确返回非零。
+
+回归覆盖链接结构、特殊路径还原、端口兼容及失败拒绝；Linux 检查还验证实际生成的 Nginx 配置能被解析。
+手机扫码和现网连接需要设备验收。本次源码发布不自动更新生产服务器，重新生成二维码的方法见
+[服务端节点链接与二维码](server-install-kernel.md#节点链接与二维码)。
+
 ## 2026-10-25：两端 BBR 与 XanMod 菜单
 
 - 客户端与服务端菜单 2 统一为启用当前 Debian 内核 BBR；清理重复的旧 BBRplus 入口。
